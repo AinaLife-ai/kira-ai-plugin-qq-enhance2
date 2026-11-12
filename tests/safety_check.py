@@ -83,9 +83,13 @@ for nm in weird_names:
                  target="2002", target_name="正常")
     try:
         out = render_env_summary([ev])
-        # 换行/回车/控制符会破坏单行摘要结构
-        bad = "\n" in out or "\r" in out or "\x00" in out
-        check(f"昵称含 {nm!r} 不破坏单行结构", not bad, repr(out))
+        # v1.1.2 起摘要是多行结构（块头 + · 条目），不再要求单行；
+        # 但昵称里的回车/控制符必须被净化，不能凭空多出一行、也不能残留控制符。
+        bad = "\r" in out or "\x00" in out
+        lines = out.split("\n") if out else []
+        bad = bad or len(lines) > 2 or (lines and not lines[0].startswith("[群动态"))
+        bad = bad or any(not ln.startswith("· ") for ln in lines[1:])
+        check(f"昵称含 {nm!r} 不破坏结构", not bad, repr(out))
     except Exception as e:
         check(f"昵称含 {nm!r}", False, f"{type(e).__name__}: {e}")
 

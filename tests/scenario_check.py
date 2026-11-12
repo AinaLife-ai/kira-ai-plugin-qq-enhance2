@@ -114,7 +114,8 @@ check("戳一戳含两人（张三和王五）", "张三" in summary and "王五
 check("禁言显示已解除", "(已解除)" in summary, summary)
 check("禁言不重复显示独立'解除禁言'条目",
       "解除禁言" not in summary, summary)
-check("退群被渲染", "退群" in summary or "离开群聊" in summary)
+check("退群不进摘要（改走 notice 唤醒）",
+      "退群" not in summary and "离开群聊" not in summary)
 check("摘要长度合理（<400 字符）", len(summary) < 400, f"{len(summary)} 字符")
 
 

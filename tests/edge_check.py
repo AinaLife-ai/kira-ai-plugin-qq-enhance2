@@ -225,7 +225,10 @@ templates = re.findall(r'text = f"(\[System[^"]*)"', ws_src)
 print(f"  唤醒模板 {len(templates)} 条:")
 for t in templates:
     print(f"    {t[:80]}")
-all_have_qq = all("{" in t and ("actor" in t or "operator" in t) for t in templates)
+all_have_qq = all(
+    "{" in t and any(k in t for k in ("actor", "operator", "who", "fmt_user"))
+    for t in templates
+)
 check("所有唤醒模板含用户标识", all_have_qq)
 check("唤醒模板无'禁言N秒'（防 S 误触发）",
       not any("禁言" in t for t in templates))

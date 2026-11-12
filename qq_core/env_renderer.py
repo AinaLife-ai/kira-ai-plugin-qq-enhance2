@@ -1,10 +1,12 @@
 """环境摘要渲染：合并他人事件为一条紧凑摘要，分层预算 + 踢旧淘汰。
 
-设计要点：
-- 输出格式：用户{QQ}({昵称})，昵称缺失回退纯 QQ。
-- 分层预算：先按类型配额渲染（每类型 ≤ N 条），总超限从最旧事件整条删除（不截断字符串）。
-- 时间前缀：[群动态·刚刚(≤60s)] / [群动态·过去N分钟] / [群动态·今天] / [群动态·昨天 HH:MM 起]。
-- 无 emoji 堆砌、无 Markdown；条目编号 ①②③ 便于模型引用。
+设计要点（v1.1.2）：
+- **每条事件带绝对时间**：`HH:MM` / `昨天 HH:MM` / `MM-DD HH:MM`（块头写"截至 HH:MM"）。
+- **分类型新鲜期**：戳一戳/贴表情短（默认 5 分钟），名片/管理员/头衔/撤回落（默认 15 分钟）。
+- **禁言是状态**：进行中显示"剩约 N 分钟"；到期后只再出现**一轮**（"已于 HH:MM 到期"），之后消失。
+- 退群/被踢**不进摘要**（改走 notice 唤醒，对齐 QQ增强1 的入群感知）。
+- 输出格式：`· 01:31 用户{QQ}({昵称}) 戳了戳 用户{QQ}({昵称})`，昵称缺失回退纯 QQ。
+- 输出按时间倒序（时间线），超预算从最旧事件整条删除（不截断字符串）。
 - 性能：O(N log N) 排序 + O(N) 渲染（N ≤ 20）。
 """
 
@@ -14,52 +16,126 @@ import time
 from typing import Optional
 
 from .fmt import fmt_user as _fmt_user
-from .event_normalizer import QQEvent, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_KICKED_SELF, E_TITLE_SELF, E_EMOJI_LIKE_SELF, E_PROFILE_LIKE_SELF
+from .event_normalizer import (
+    QQEvent, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_RECALL,
+    E_TITLE, E_CARD, E_ADMIN,
+)
+
+# 短新鲜期：瞬时互动，过了就没意义（默认 5 分钟）
+FRESH_TYPES = frozenset({E_POKE, E_EMOJI_LIKE})
+# 长新鲜期：低频状态/结构变化（默认 15 分钟）
+SLOW_TYPES = frozenset({E_CARD, E_ADMIN, E_TITLE, E_RECALL})
+
+# 禁言到期后，最多再"补报"这么久（防止重启后把很久以前的禁言翻出来）
+BAN_EXPIRY_GRACE_SECONDS = 3600
 
 
+def fmt_clock(ts: float, now: Optional[float] = None) -> str:
+    """把时间戳格式化成绝对时间（当天 HH:MM / 昨天 HH:MM / MM-DD HH:MM）。
 
+    Args:
+        ts: 事件时间戳。
+        now: 当前时间（默认 time.time()）。
 
-def _time_prefix(events: list[QQEvent]) -> str:
-    """时间前缀（按日历日期判断，不是按 age 时长）。
-
-    格式：
-      [群动态·刚刚]           最新事件 ≤ 60 秒
-      [群动态·过去N分钟]      最新事件 ≤ 60 分钟
-      [群动态·今天 HH:MM 起]  最新事件在今天
-      [群动态·昨天 HH:MM 起]  最新事件在昨天
-      [群动态·MM-DD HH:MM 起] 更早
-
-    注意：用"最新事件"而非"最旧事件"判断，因为摘要描述的是"刚刚发生了什么"，
-    用最新事件的时间更符合直觉。
+    Returns:
+        格式化后的时间字符串。
     """
-    if not events:
-        return ""
+    from datetime import datetime
+
+    now = time.time() if now is None else now
     try:
-        from datetime import datetime, timedelta
-        now = time.time()
-        newest = max(ev.ts for ev in events)
-        age = now - newest
-
-        if age <= 60:
-            return "[群动态·刚刚]"
-        if age <= 3600:
-            return f"[群动态·过去{int(age // 60)}分钟]"
-
-        # 按日历日期判断（不是按 age 时长，避免跨天误判）
-        dt = datetime.fromtimestamp(newest)
+        dt = datetime.fromtimestamp(ts)
         today = datetime.fromtimestamp(now).date()
-        target_date = dt.date()
-        delta_days = (today - target_date).days
-
-        hm = dt.strftime("%H:%M")
+        delta_days = (today - dt.date()).days
         if delta_days == 0:
-            return f"[群动态·今天 {hm} 起]"
-        elif delta_days == 1:
-            return f"[群动态·昨天 {hm} 起]"
-        else:
-            return f"[群动态·{dt.strftime('%m-%d %H:%M')} 起]"
+            return dt.strftime("%H:%M")
+        if delta_days == 1:
+            return "昨天 " + dt.strftime("%H:%M")
+        return dt.strftime("%m-%d %H:%M")
     except Exception:
-        return "[群动态]"
+        return ""
+
+
+def env_header(now: Optional[float] = None) -> str:
+    """摘要块头：`[群动态·截至 HH:MM]`。"""
+    now = time.time() if now is None else now
+    t = fmt_clock(now, now)
+    return f"[群动态·截至 {t}]" if t else "[群动态]"
+
+
+def event_ttl(etype: str, fresh_seconds: float, slow_seconds: float) -> float:
+    """按类型取新鲜期（秒）。"""
+    if etype in FRESH_TYPES:
+        return fresh_seconds
+    return slow_seconds
+
+
+def _ban_duration(ev: QQEvent) -> int:
+    """安全读取禁言时长（落盘/外部构造可能是字符串）。"""
+    try:
+        return int(float(ev.extra.get("duration", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def filter_env_events(
+    events: list[QQEvent],
+    *,
+    now: float,
+    fresh_seconds: float = 300,
+    slow_seconds: float = 900,
+    expiry_announced: Optional[dict] = None,
+) -> list[QQEvent]:
+    """按"分类型新鲜期 + 禁言状态机"过滤要进摘要的事件。
+
+    Args:
+        events: 候选事件（时间升序）。
+        now: 当前时间戳。
+        fresh_seconds: 瞬时事件新鲜期（戳/贴表情）。
+        slow_seconds: 低频事件新鲜期（名片/管理员/头衔/撤回）。
+        expiry_announced: 已"补报到期"的禁言 eid 集合（dict eid→ts）。
+
+    Returns:
+        过滤后的事件（保持原顺序）。
+    """
+    # 第一遍：禁言（状态驱动）
+    keep_ban: dict[str, bool] = {}
+    for ev in events:
+        if ev.etype != E_BAN:
+            continue
+        duration = _ban_duration(ev)
+        if duration <= 0:
+            keep_ban[ev.eid] = (now - ev.ts) <= slow_seconds
+            continue
+        expire_ts = ev.ts + duration
+        if now < expire_ts:
+            keep_ban[ev.eid] = True          # 仍在禁言中
+            continue
+        # 已到期：没补报过、且在补报宽限期内 → 保留（渲染时会标"已于…到期"）
+        announced = bool(expiry_announced) and ev.eid in expiry_announced
+        keep_ban[ev.eid] = (not announced) and (now - expire_ts) <= BAN_EXPIRY_GRACE_SECONDS
+
+    # 仍在渲染的禁言，其 target 用于"解禁配对"（否则解禁过期后，禁言会误显示为仍在进行）
+    ban_targets_kept = {ev.target for ev in events
+                        if ev.etype == E_BAN and keep_ban.get(ev.eid) and ev.target}
+
+    out = []
+    for ev in events:
+        if ev.etype == E_BAN:
+            if keep_ban.get(ev.eid):
+                out.append(ev)
+            continue
+        if ev.etype == E_UNBAN:
+            # 与仍在显示的禁言配对 → 无论多久都要保留（否则禁言状态会错）
+            if ev.target and ev.target in ban_targets_kept:
+                out.append(ev)
+            elif now - ev.ts <= slow_seconds:
+                out.append(ev)
+            continue
+
+        if now - ev.ts <= event_ttl(ev.etype, fresh_seconds, slow_seconds):
+            out.append(ev)
+    return out
 
 
 def render_env_summary(
@@ -68,13 +144,20 @@ def render_env_summary(
     max_per_type: int = 6,
     max_chars: int = 800,
     poke_action_text: bool = False,
+    show_time: bool = True,
+    now: Optional[float] = None,
+    expiry_announced: Optional[dict] = None,
 ) -> str:
     """渲染环境摘要（分层预算 + 踢旧淘汰）。
 
     Args:
-        events: 事件列表（按时间升序）。
-        max_per_type: 每类型最多渲染条数。
+        events: 事件列表（按时间升序，调用方已做新鲜期过滤）。
+        max_per_type: 每类型最多渲染条数（合并型类型不受限）。
         max_chars: 摘要字符上限（超限从最旧事件整条删除，不截断字符串）。
+        poke_action_text: 是否用协议端真实动作文案（拍了拍等）。
+        show_time: 是否给每条事件加绝对时间。
+        now: 当前时间戳（默认 time.time()）。
+        expiry_announced: 已补报过期的禁言 eid 集合（dict，渲染时会写入）。
 
     Returns:
         渲染后的摘要文本（空则返回空串）。
@@ -82,38 +165,38 @@ def render_env_summary(
     if not events:
         return ""
 
-    header = _time_prefix(events)
+    now = time.time() if now is None else now
+    header = env_header(now)
 
     def _assemble(evts: list[QQEvent]) -> str:
-        """按当前事件集合渲染（无编号，用；分隔以省 token）。
-
-        注意：max_per_type 截断对"可合并类型"（poke/emoji_like）无效——
-        先合并再截断会丢事件（8 条戳一戳取 6 条合并 = 漏 2 条），
-        所以这些类型传入全部事件，由渲染函数内部决定显示粒度。
-        """
         by_t: dict[str, list[QQEvent]] = {}
         for ev in evts:
             by_t.setdefault(ev.etype, []).append(ev)
         for et in by_t:
             by_t[et].sort(key=lambda e: e.ts, reverse=True)
-        order = sorted(
-            by_t.keys(),
-            key=lambda et: by_t[et][0].ts if by_t[et] else 0,
-            reverse=True,
-        )
+
         # 合并型类型：渲染函数内部会归并，传全量避免丢事件
         merge_types = {E_POKE, E_EMOJI_LIKE}
-        parts = []
-        for et in order:
-            subset = by_t[et] if et in merge_types else by_t[et][:max_per_type]
-            rendered = _render_type(et, subset, all_events=evts,
-                                    poke_action_text=poke_action_text)
-            if rendered:
-                parts.append(rendered)
-        if not parts:
+        items: list[tuple[int, str]] = []
+        for et, subset_all in by_t.items():
+            subset = subset_all if et in merge_types else subset_all[:max_per_type]
+            items.extend(_render_type(
+                et, subset, all_events=evts,
+                poke_action_text=poke_action_text,
+                now=now, expiry_announced=expiry_announced,
+            ))
+        if not items:
             return ""
-        body = "；".join(parts)
-        return f"{header} {body}" if header else body
+        # 时间线：新→旧
+        items.sort(key=lambda x: x[0], reverse=True)
+        lines = []
+        for ts, text in items:
+            if show_time:
+                t = fmt_clock(ts, now)
+                lines.append(f"· {t} {text}" if t else f"· {text}")
+            else:
+                lines.append(f"· {text}")
+        return header + "\n" + "\n".join(lines)
 
     candidate = _assemble(events)
 
@@ -128,34 +211,41 @@ def render_env_summary(
 
 def _render_type(etype: str, events: list[QQEvent],
                  all_events: list[QQEvent] | None = None,
-                 poke_action_text: bool = False) -> str:
-    """渲染单个类型的事件（已排序，新事件在前）。
+                 poke_action_text: bool = False,
+                 now: Optional[float] = None,
+                 expiry_announced: Optional[dict] = None) -> list[tuple[int, str]]:
+    """渲染单个类型的事件，返回 [(时间戳, 文本)]。
 
     Args:
         etype: 事件类型。
         events: 该类型的事件（已排序、已截断到 max_per_type）。
         all_events: 全量事件（用于跨类型配对，如 ban ↔ unban）。
+        poke_action_text: 是否用真实动作文案。
+        now: 当前时间戳。
+        expiry_announced: 禁言"已补报到期"集合。
     """
     all_events = all_events if all_events is not None else events
+    now = time.time() if now is None else now
+    out: list[tuple[int, str]] = []
+
     if etype == E_POKE:
         # 合并策略（省 token）：
         # 1. 同 actor → 同 target 的 N 次 → ×N
         # 2. 多 actor → 同 target → 合并为 "A、B、C 戳了戳 T"
         pair_count: dict[tuple[str, str], int] = {}
+        pair_ts: dict[tuple[str, str], int] = {}
         actor_names: dict[str, str] = {}
         target_names: dict[str, str] = {}
-        # 动作文案：优先用协议端给的（NapCat raw_info / SnowLuma action）
-        # 如"拍了拍""戳了戳"，取不到时回退默认"戳了戳"
         pair_action: dict[tuple[str, str], str] = {}
         for ev in events:
             key = (ev.actor, ev.target)
             pair_count[key] = pair_count.get(key, 0) + 1
+            pair_ts[key] = max(pair_ts.get(key, 0), ev.ts)
             if ev.actor:
                 actor_names[ev.actor] = ev.actor_name
             if ev.target:
                 target_names[ev.target] = ev.target_name
-            # 默认（poke_action_text=False）归一为"戳了戳"，与框架的归一解析保持一致；
-            # 开启后才用协议端真实文案（拍了拍 / 摸了摸 等）
+            # 默认归一为"戳了戳"，与框架归一解析保持一致；开启后才用协议端真实文案
             if poke_action_text:
                 act = str(ev.extra.get("raw_action") or "").strip()
                 if act and key not in pair_action:
@@ -166,10 +256,10 @@ def _render_type(etype: str, events: list[QQEvent],
         for (actor, target), cnt in pair_count.items():
             by_target.setdefault(target, []).append((actor, cnt))
 
-        parts = []
         for target, lst in by_target.items():
             tname = target_names.get(target, "")
             total = sum(c for _, c in lst)
+            ts = max((pair_ts.get((a, target), 0) for a, _ in lst), default=0)
             if len(lst) == 1:
                 actor, cnt = lst[0]
                 act = pair_action.get((actor, target), "") or "戳了戳"
@@ -183,19 +273,17 @@ def _render_type(etype: str, events: list[QQEvent],
                     for a, _ in lst[:3]
                 ]
                 more = f"等{len(lst)}人" if len(lst) > 3 else ""
-                # 多人时动作可能不同，用最常见的那个
                 acts = [pair_action.get((a, target), "") for a, _ in lst]
                 acts = [a for a in acts if a]
                 act = max(set(acts), key=acts.count) if acts else "戳了戳"
                 part = f"{'、'.join(names)}{more} {act} {_fmt_user(target, tname)}"
                 if total > len(lst):
                     part += f"（共{total}次）"
-            parts.append(part)
-        return "；".join(parts)
+            out.append((ts, part))
+        return out
 
     elif etype == E_EMOJI_LIKE:
         # 合并：按 (actor, target_message_author) 归并
-        # 注意：target_message_author 需 message_locator 反查（此处 events 已带 target/target_name）
         from .emoji_display import format_emoji_list
         groups: dict[tuple[str, str], dict] = {}
         for ev in events:
@@ -208,18 +296,18 @@ def _render_type(etype: str, events: list[QQEvent],
                     "emoji_ids": list(ev.extra.get("emoji_ids", [])),
                     "count": ev.extra.get("count", 1),
                     "message_ids": [ev.extra.get("message_id", "")] if ev.extra.get("message_id") else [],
+                    "ts": ev.ts,
                 }
             else:
-                # 合并表情 ID（去重保序）+ 累加次数
                 for e in ev.extra.get("emoji_ids", []):
                     if e and e not in g["emoji_ids"]:
                         g["emoji_ids"].append(e)
                 g["count"] += ev.extra.get("count", 1)
+                g["ts"] = max(g["ts"], ev.ts)
                 mid = ev.extra.get("message_id", "")
                 if mid and mid not in g["message_ids"] and len(g["message_ids"]) < 3:
                     g["message_ids"].append(mid)
 
-        parts = []
         for (actor, target), g in groups.items():
             emoji_str = format_emoji_list(g["emoji_ids"], g["count"])
             part = (
@@ -230,83 +318,62 @@ def _render_type(etype: str, events: list[QQEvent],
             if g["message_ids"]:
                 ids = ",".join(g["message_ids"])
                 part += f"(消息 {ids})"
-            parts.append(part)
-        return "；".join(parts)
+            out.append((g["ts"], part))
+        return out
 
     elif etype == E_BAN:
-        # 禁言渲染：与同 target 的解除禁言事件配对
-        # - 已解除 → 显示时长 + (已解除)
-        # - 未解除且未到期 → 显示 (仍禁言中，剩约N分钟)
-        # - 已自然到期 → 显示 (禁言时长已过)
+        # 禁言：状态机
+        # - 已解除 → "（已解除）"
+        # - 仍禁言中 → "（剩约N分钟）"
+        # - 已自然到期 → "（已于 HH:MM 到期）"，只报一次
         unban_by_target: dict[str, list[QQEvent]] = {}
         for ev in all_events:
             if ev.etype == E_UNBAN and ev.target:
                 unban_by_target.setdefault(ev.target, []).append(ev)
 
-        parts = []
-        now = time.time()
         for ev in events:
-            # duration 归一化：normalizer 通常已转 int，但落盘/外部构造可能是
-            # 字符串或 None → 统一转 int，避免 `duration > 0` 比较崩溃
-            try:
-                duration = int(float(ev.extra.get("duration", 0) or 0))
-            except (TypeError, ValueError):
-                duration = 0
+            duration = _ban_duration(ev)
             if ev.actor:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
             else:
-                # 协议端没给 operator_id 时不要渲染成"被 用户(未知) 禁言"
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被禁言"
             if duration > 0:
                 part += f" {duration}秒"
-            # 配对解除事件（同 target，时间晚于本次 ban）
+
             unban = next(
                 (u for u in unban_by_target.get(ev.target, []) if u.ts >= ev.ts),
                 None,
             )
             if unban:
-                part += "(已解除)"
+                part += "（已解除）"
             elif duration > 0:
                 remain = int(duration - (now - ev.ts))
                 if remain > 0:
-                    part += f"(仍禁言中，剩约{remain // 60 + 1}分钟)"
+                    part += f"（剩约{max(1, remain // 60 + 1)}分钟）"
                 else:
-                    part += "(禁言时长已过)"
-            parts.append(part)
-        return "；".join(parts)
+                    # 已经到期：只补报一次，之后由 filter_env_events 过滤掉
+                    if expiry_announced is not None and ev.eid in expiry_announced:
+                        continue
+                    if expiry_announced is not None:
+                        expiry_announced[ev.eid] = now
+                    part += f"（已于 {fmt_clock(ev.ts + duration, now)} 到期）"
+            out.append((ev.ts, part))
+        return out
 
     elif etype == E_UNBAN:
         # 解除禁言：若已作为某个 ban 的配对显示，这里跳过（避免重复）
         ban_targets = {
             ev.target for ev in all_events if ev.etype == E_BAN and ev.target
         }
-        parts = []
         for ev in events:
             if ev.target in ban_targets:
-                continue  # 已由 E_BAN 分支配对显示
+                continue
             if ev.actor:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
             else:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被解除禁言"
-            parts.append(part)
-        return "；".join(parts)
-
-    elif etype == E_MEMBER_DECREASE:
-        parts = []
-        for ev in events:
-            sub = ev.extra.get("sub_type", "")
-            # 注意 kick_me 是"被踢的人（通常是 bot）"，个别协议端会给他人也标 kick_me
-            if sub in ("kick", "kick_me"):
-                action = "被移出群聊"
-            elif sub == "leave":
-                action = "退群"
-            else:
-                action = "离开群聊"
-            part = f"{_fmt_user(ev.target, ev.target_name)} {action}"
-            if ev.actor:
-                part += f"(操作者:{_fmt_user(ev.actor, ev.actor_name)})"
-            parts.append(part)
-        return "；".join(parts)
+            out.append((ev.ts, part))
+        return out
 
     elif etype == E_RECALL:
         # 合并：同一操作者的多次撤回合并为 "X 撤回了 N 条消息"
@@ -315,33 +382,27 @@ def _render_type(etype: str, events: list[QQEvent],
             key = ev.actor or ev.target or "unknown"
             by_actor.setdefault(key, []).append(ev)
 
-        parts = []
         for key, lst in by_actor.items():
             ev0 = lst[0]
-            # 私聊撤回常常没有 operator_id → 用被撤回消息的作者兜底，
-            # 否则会渲染出"用户(未知) 撤回了一条消息"
             who = _fmt_user(ev0.actor or ev0.target, ev0.actor_name or ev0.target_name)
-            # 区分操作者身份：撤回自己 vs 撤回他人
             if ev0.actor and ev0.target and ev0.actor != ev0.target:
                 detail = "撤回了他人消息"
             else:
                 detail = "撤回了一条消息"
+            ts = max(e.ts for e in lst)
             if len(lst) > 1:
-                parts.append(f"{who} {detail}×{len(lst)}")
+                out.append((ts, f"{who} {detail}×{len(lst)}"))
             else:
-                parts.append(f"{who} {detail}")
-        return "；".join(parts)
+                out.append((ts, f"{who} {detail}"))
+        return out
 
     elif etype == E_TITLE:
-        parts = []
         for ev in events:
             title = ev.extra.get("title", "")
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被授予头衔\"{title}\""
-            parts.append(part)
-        return "；".join(parts)
+            out.append((ev.ts, f"{_fmt_user(ev.target, ev.target_name)} 被授予头衔\"{title}\""))
+        return out
 
     elif etype == E_CARD:
-        parts = []
         for ev in events:
             card_new = ev.extra.get("card_new", "")
             card_old = ev.extra.get("card_old", "")
@@ -351,17 +412,16 @@ def _render_type(etype: str, events: list[QQEvent],
                 part = f"{_fmt_user(ev.target, ev.target_name)} 群名片更新为: {card_new}"
             else:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 群名片更新"
-            parts.append(part)
-        return "；".join(parts)
+            out.append((ev.ts, part))
+        return out
 
     elif etype == E_ADMIN:
-        parts = []
         for ev in events:
             sub = ev.extra.get("sub_type", "")
             action = "被设为管理员" if sub == "set" else "被取消管理员"
-            part = f"{_fmt_user(ev.target, ev.target_name)} {action}"
-            parts.append(part)
-        return "；".join(parts)
+            out.append((ev.ts, f"{_fmt_user(ev.target, ev.target_name)} {action}"))
+        return out
 
-    # 唤醒级事件（E_KICKED_SELF / E_TITLE_SELF / E_EMOJI_LIKE_SELF / E_PROFILE_LIKE_SELF）不在环境摘要渲染
-    return ""
+    # 唤醒级事件（E_KICKED_SELF / E_TITLE_SELF / E_EMOJI_LIKE_SELF / E_PROFILE_LIKE_SELF）
+    # 与退群/被踢（E_MEMBER_DECREASE）都不在环境摘要里
+    return out

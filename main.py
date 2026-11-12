@@ -24,7 +24,7 @@ from core.prompt_manager import Prompt
 
 from .qq_core.event_normalizer import normalize_notice, involves_self, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF
 from .qq_core.event_store import EventStore
-from .qq_core.env_renderer import render_env_summary
+from .qq_core.env_renderer import render_env_summary, filter_env_events
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
@@ -61,15 +61,19 @@ class QQEnhance2Plugin(BasePlugin):
         self.wake_profile_like = self.plugin_cfg.get("wake_profile_like", True)
         self.wake_title = self.plugin_cfg.get("wake_title", True)
         self.wake_kicked = self.plugin_cfg.get("wake_kicked", True)
+        self.wake_member_decrease = self.plugin_cfg.get("wake_member_decrease", True)
         self.profile_like_merge_window_seconds = _safe_int(
             self.plugin_cfg.get("profile_like_merge_window_seconds"), 10)
         self.wake_quiet_hours = self.plugin_cfg.get("wake_quiet_hours", "") or ""
         self.wake_max_per_hour = _safe_int(self.plugin_cfg.get("wake_max_per_hour"), 60)
 
-        self.perceive_window_seconds = _safe_int(self.plugin_cfg.get("perceive_window_seconds"), 1800)
+        self.perceive_window_seconds = _safe_int(self.plugin_cfg.get("perceive_window_seconds"), 900)
         self.perceive_max_events = _safe_int(self.plugin_cfg.get("perceive_max_events"), 20)
         self.perceive_max_per_type = _safe_int(self.plugin_cfg.get("perceive_max_per_type"), 6)
         self.env_max_chars = _safe_int(self.plugin_cfg.get("env_max_chars"), 800)
+        self.env_show_time = self.plugin_cfg.get("env_show_time", True)
+        self.env_fresh_seconds = _safe_int(self.plugin_cfg.get("env_fresh_seconds"), 300)
+        self.env_slow_seconds = _safe_int(self.plugin_cfg.get("env_slow_seconds"), 900)
         self.env_inject_min_interval = _safe_int(self.plugin_cfg.get("env_inject_min_interval"), 0)
         self.env_ttl_hours = _safe_int(self.plugin_cfg.get("env_ttl_hours"), 24)
 
@@ -104,6 +108,8 @@ class QQEnhance2Plugin(BasePlugin):
         self.name_resolver: Optional[NameResolver] = None
         self.recall_rewriter: Optional[RecallRewriter] = None
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
+        # 已"补报到期"的禁言事件（eid → 首次补报时间）：只补一次，之后不再渲染
+        self._ban_expiry_announced: dict[str, float] = {}
 
     async def initialize(self):
         """初始化运行时组件。
@@ -278,8 +284,8 @@ class QQEnhance2Plugin(BasePlugin):
         Returns:
             事件类型集合。
         """
-        types = {E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE,
-                 E_TITLE, E_CARD, E_ADMIN}
+        # 退群/被踢不进摘要（改走 notice 唤醒，对齐 QQ增强1 的入群感知）
+        types = {E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_TITLE, E_CARD, E_ADMIN}
         if self.recall_in_env:
             types.add(E_RECALL)
         return types
@@ -716,6 +722,12 @@ class QQEnhance2Plugin(BasePlugin):
             await self._add_env_event(qq_event, cur_self_id)
             return
 
+        # 退群/被踢：不进摘要，改成 notice（和 QQ增强1 的入群感知同款）
+        if qq_event.etype == E_MEMBER_DECREASE:
+            if self.wake_member_decrease:
+                await self.wake_scheduler.trigger_member_decrease(qq_event)
+            return
+
         # 其他事件：入 store（涉及 bot 自己的不进群动态）
         if self.debug_log:
             logger.info(
@@ -747,10 +759,22 @@ class QQEnhance2Plugin(BasePlugin):
                 should_inject = False
 
         if should_inject:
+            now_ts = time.time()
+            # 查询下限取三者最大值：全局窗口只作安全阀，真正的显示由分类型新鲜期决定
+            lookback = max(self.perceive_window_seconds,
+                           self.env_fresh_seconds, self.env_slow_seconds)
             events = await self.store.get_events(
                 sid,
-                since_ts=time.time() - self.perceive_window_seconds,
+                since_ts=now_ts - lookback,
                 etypes=self._env_etypes(),
+            )
+            # 分类型新鲜期 + 禁言状态机（到期只补报一次）
+            events = filter_env_events(
+                events,
+                now=now_ts,
+                fresh_seconds=self.env_fresh_seconds,
+                slow_seconds=self.env_slow_seconds,
+                expiry_announced=self._ban_expiry_announced,
             )
             # 历史残留兜底：旧版本落盘/内存里可能还有"涉及 bot 自己"的事件
             # （例如别人戳 bot），渲染前按当前 self_id 再过滤一次。
@@ -763,6 +787,9 @@ class QQEnhance2Plugin(BasePlugin):
                 max_per_type=self.perceive_max_per_type,
                 max_chars=self.env_max_chars,
                 poke_action_text=self.poke_action_text,
+                show_time=self.env_show_time,
+                now=now_ts,
+                expiry_announced=self._ban_expiry_announced,
             )
             if env_text:
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
