@@ -35,7 +35,8 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `collect_poke` | true | 感知他人戳一戳 |
-| `collect_emoji_like` | true | 感知他人贴表情 |
+| `collect_emoji_like` | true | 感知他人贴表情（原文标注 + 唤醒判定） |
+| `collect_emoji_like_env` | false | 贴表情是否进群动态摘要（默认关，已由两路推送覆盖） |
 | `collect_group_ban` | true | 感知他人被禁言 |
 | `collect_recall` | true | 感知撤回 |
 | `collect_member_decrease` | true | 感知退群/被踢 |

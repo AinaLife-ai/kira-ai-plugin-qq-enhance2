@@ -39,6 +39,7 @@ class QQEnhance2Plugin(BasePlugin):
         # 配置
         self.collect_poke = self.plugin_cfg.get("collect_poke", True)
         self.collect_emoji_like = self.plugin_cfg.get("collect_emoji_like", True)
+        self.collect_emoji_like_env = self.plugin_cfg.get("collect_emoji_like_env", False)
         self.collect_group_ban = self.plugin_cfg.get("collect_group_ban", True)
         self.collect_recall = self.plugin_cfg.get("collect_recall", True)
         self.collect_member_decrease = self.plugin_cfg.get("collect_member_decrease", True)
@@ -241,8 +242,10 @@ class QQEnhance2Plugin(BasePlugin):
                 # 检查是否需要唤醒（默认冷却 20 秒）
                 if self.wake_scheduler.should_wake_now(qq_event):
                     await self.wake_scheduler.trigger_others_emoji_like(qq_event, msg_author, msg_author_name, msg_excerpt)
-                else:
-                    # 不唤醒 → 入 store（环境摘要可见）
+                elif self.collect_emoji_like_env:
+                    # 不唤醒 → 入 store（群动态摘要可见）
+                    # 默认关闭：贴表情已由"自己被贴唤醒 / 他人贴表情可唤醒"两路推送覆盖，
+                    # 再默认进群动态摘要会重复且浪费 token
                     await self.store.add(qq_event)
             return
 

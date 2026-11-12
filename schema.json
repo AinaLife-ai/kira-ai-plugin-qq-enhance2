@@ -9,7 +9,13 @@
         "name": "感知他人贴表情",
         "type": "switch",
         "default": true,
-        "hint": "收集群内他人给他人消息贴表情的事件，合并入环境摘要"
+        "hint": "收集群内他人给他人消息贴表情的事件，用于原文标注和唤醒判定"
+    },
+    "collect_emoji_like_env": {
+        "name": "贴表情进群动态摘要",
+        "type": "switch",
+        "default": false,
+        "hint": "贴表情可由「自己被贴唤醒」「他人贴表情可唤醒」两路推送覆盖，再进摘要可形成被动感知形态但会增加token消耗"
     },
     "collect_group_ban": {
         "name": "感知他人被禁言",

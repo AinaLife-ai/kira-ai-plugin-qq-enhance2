@@ -71,7 +71,7 @@ def render_env_summary(
     header = _time_prefix(events)
 
     def _assemble(evts: list[QQEvent]) -> str:
-        """按当前事件集合渲染并编号拼接。"""
+        """按当前事件集合渲染（无编号，用；分隔，省 token）。"""
         by_t: dict[str, list[QQEvent]] = {}
         for ev in evts:
             by_t.setdefault(ev.etype, []).append(ev)
@@ -89,12 +89,7 @@ def render_env_summary(
                 parts.append(rendered)
         if not parts:
             return ""
-        circled = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-        numbered = []
-        for i, p in enumerate(parts):
-            mark = circled[i] if i < len(circled) else f"({i + 1})"
-            numbered.append(f"{mark}{p}")
-        body = "；".join(numbered)
+        body = "；".join(parts)
         return f"{header} {body}" if header else body
 
     candidate = _assemble(events)
@@ -124,7 +119,7 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             if count > 1:
                 part += f"×{count}"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_EMOJI_LIKE:
         # 合并：按 (actor, target_message_author) 归并
@@ -140,7 +135,7 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             if msg_id:
                 part += f"(msg:{msg_id[:8]}...)"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_BAN:
         # 合并：同 target 的 N 次 ban 合并
@@ -149,14 +144,14 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             duration = ev.extra.get("duration", 0)
             part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言 {duration}秒"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_UNBAN:
         parts = []
         for ev in events:
             part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_MEMBER_DECREASE:
         parts = []
@@ -172,14 +167,14 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             if ev.actor:
                 part += f"(操作者:{_fmt_user(ev.actor, ev.actor_name)})"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_RECALL:
         parts = []
         for ev in events:
             part = f"{_fmt_user(ev.actor, ev.actor_name)} 撤回了一条消息"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_TITLE:
         parts = []
@@ -187,7 +182,7 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             title = ev.extra.get("title", "")
             part = f"{_fmt_user(ev.target, ev.target_name)} 被授予头衔\"{title}\""
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_CARD:
         parts = []
@@ -201,7 +196,7 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             else:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 群名片更新"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     elif etype == E_ADMIN:
         parts = []
@@ -210,7 +205,7 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
             action = "被设为管理员" if sub == "set" else "被取消管理员"
             part = f"{_fmt_user(ev.target, ev.target_name)} {action}"
             parts.append(part)
-        return "; ".join(parts)
+        return "；".join(parts)
 
     # 唤醒级事件（E_KICKED_SELF / E_TITLE_SELF / E_EMOJI_LIKE_SELF / E_PROFILE_LIKE_SELF）不在环境摘要渲染
     return ""
