@@ -314,3 +314,18 @@ def test_resolve_cache_seconds():
 
     assert asyncio.run(run(10)) == 1, "10 秒内第二次应命中缓存"
     assert asyncio.run(run(0)) == 2, "0 = 不缓存，每次都查"
+
+
+def test_prune_ban_expiry_bounded():
+    """禁言补报集合不能无限增长（超过 512 条要裁，且丢弃 1 小时前的记录）。"""
+    import time as _t
+    from qq_core.env_renderer import prune_expiry_announced
+
+    now = _t.time()
+    announced = {f"e{i}": now - (i % 7200) for i in range(2000)}
+    kept = prune_expiry_announced(announced, now)
+    assert len(kept) <= 512, len(kept)
+    assert all(v >= now - 3600 for v in kept.values())
+    # 小规模不动
+    small = {"a": now}
+    assert prune_expiry_announced(small, now) is small

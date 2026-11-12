@@ -24,7 +24,8 @@ from core.prompt_manager import Prompt
 
 from .qq_core.event_normalizer import normalize_notice, involves_self, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF
 from .qq_core.event_store import EventStore
-from .qq_core.env_renderer import render_env_summary, filter_env_events
+from .qq_core.env_renderer import (render_env_summary, filter_env_events,
+                                   prune_expiry_announced)
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
@@ -770,6 +771,9 @@ class QQEnhance2Plugin(BasePlugin):
                 since_ts=now_ts - lookback,
                 etypes=self._env_etypes(),
             )
+            # 禁言补报标记的容量保护（按 eid 记录，只增不减）
+            self._ban_expiry_announced = prune_expiry_announced(
+                self._ban_expiry_announced, now_ts)
             # 分类型新鲜期 + 禁言状态机（到期只补报一次）
             events = filter_env_events(
                 events,

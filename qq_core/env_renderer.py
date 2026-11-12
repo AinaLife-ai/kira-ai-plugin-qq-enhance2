@@ -78,6 +78,28 @@ def _ban_duration(ev: QQEvent) -> int:
         return 0
 
 
+def prune_expiry_announced(announced: dict, now: float, *,
+                           limit: int = 512, max_age: float = 3600) -> dict:
+    """裁剪"禁言到期已补报"集合（按 eid 记录，只增不减会慢慢涨）。
+
+    Args:
+        announced: {eid: 首次补报时间戳}。
+        now: 当前时间戳。
+        limit: 超过多少条才动手。
+        max_age: 丢弃多少秒之前的记录。
+
+    Returns:
+        裁剪后的新 dict（不修改入参）。
+    """
+    if len(announced) <= limit:
+        return announced
+    cutoff = now - max_age
+    kept = {k: v for k, v in announced.items() if v >= cutoff}
+    if len(kept) > limit:
+        kept = dict(sorted(kept.items(), key=lambda kv: kv[1], reverse=True)[:limit])
+    return kept
+
+
 def filter_env_events(
     events: list[QQEvent],
     *,

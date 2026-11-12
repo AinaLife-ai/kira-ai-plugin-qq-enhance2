@@ -189,17 +189,6 @@ class EmojiRewriter:
         else:
             self._store.clear()
 
-    def prune(self, max_age_seconds: float = 600) -> None:
-        """清理过期归档。"""
-        import time as _t
-        cutoff = _t.time() - max_age_seconds
-        for sid in list(self._store.keys()):
-            remain = [it for it in self._store[sid] if it.get("ts", 0) >= cutoff]
-            if remain:
-                self._store[sid] = remain
-            else:
-                self._store.pop(sid, None)
-
     def get(self, sid: str) -> list:
         """读取某会话的归档（测试/诊断用）。"""
         return list(self._store.get(sid, []))
@@ -253,8 +242,3 @@ async def rewrite_emoji_like(*, sid: str, req, enabled: bool = True) -> None:
 def clear_emoji_archive(sid: str = "") -> None:
     """清空贴表情归档（转发到默认实例）。"""
     _DEFAULT.clear(sid)
-
-
-def prune_emoji_archive(max_age_seconds: float = 600) -> None:
-    """清理过期贴表情归档（转发到默认实例）。"""
-    _DEFAULT.prune(max_age_seconds)

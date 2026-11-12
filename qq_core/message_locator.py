@@ -302,19 +302,3 @@ class MessageLocator:
                 self._recall_store[sid] = remain
             else:
                 self._recall_store.pop(sid, None)
-
-    async def prune_recalls(self, max_age_seconds: float = 600):
-        """清理过期撤回归档（默认 10 分钟）。
-
-        未匹配的归档会一直保留到过期——避免标注永久丢失，
-        同时防止无限增长。
-        """
-        cutoff = time.time() - max_age_seconds
-        async with self._lock:
-            for sid in list(self._recall_store.keys()):
-                lst = self._recall_store[sid]
-                remain = [r for r in lst if r.get("ts", 0) >= cutoff]
-                if remain:
-                    self._recall_store[sid] = remain
-                else:
-                    self._recall_store.pop(sid, None)
