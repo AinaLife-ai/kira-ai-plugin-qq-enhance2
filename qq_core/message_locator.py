@@ -17,6 +17,8 @@ from typing import Optional
 
 from core.logging_manager import get_logger
 
+from .fmt import fmt_user as _fmt_user
+
 logger = get_logger("qq_enhance2.locator", "cyan")
 
 
@@ -181,19 +183,18 @@ class MessageLocator:
             action_desc = "撤回了一条消息"
             role_prefix = ""
         else:
-            # 检查是否是群主/管理员（需 get_group_member_info）
+            # 他人撤回（管理员/群主/其他）→ 检查具体角色
             role = await self._get_group_member_role(sid, operator)
+            action_desc = "撤回了一条消息"
             if role == "owner":
-                action_desc = "撤回了此消息"
-                role_prefix = "(群主)"
+                role_prefix = "（群主）"
             elif role == "admin":
-                action_desc = "撤回了此消息"
-                role_prefix = "(管理员)"
+                role_prefix = "（管理员）"
             else:
-                action_desc = "撤回了此消息"
                 role_prefix = ""
 
         # 标注格式：用户{QQ}({昵称}){角色前缀} {动作}
+        # 例：[已撤回｜用户8888(管理员A)（管理员） 撤回了一条消息]
         if role_prefix:
             annotation = f"\n[已撤回｜{_fmt_user(effective_operator, effective_operator_name)}{role_prefix} {action_desc}]"
         else:
@@ -287,14 +288,3 @@ class MessageLocator:
                     self._recall_store[sid] = remain
                 else:
                     self._recall_store.pop(sid, None)
-
-
-def _fmt_user(qq: str, name: str) -> str:
-    if qq and name:
-        return f"用户{qq}({name})"
-    elif qq:
-        return f"用户{qq}"
-    elif name:
-        return f"用户({name})"
-    else:
-        return "用户(未知)"

@@ -13,19 +13,10 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+from .fmt import fmt_user as _fmt_user
 from .event_normalizer import QQEvent, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_KICKED_SELF, E_TITLE_SELF, E_EMOJI_LIKE_SELF, E_PROFILE_LIKE_SELF
 
 
-def _fmt_user(qq: str, name: str) -> str:
-    """格式化用户：用户{QQ}({昵称})，昵称缺失回退纯 QQ。"""
-    if qq and name:
-        return f"用户{qq}({name})"
-    elif qq:
-        return f"用户{qq}"
-    elif name:
-        return f"用户({name})"
-    else:
-        return "用户(未知)"
 
 
 def _time_prefix(events: list[QQEvent]) -> str:

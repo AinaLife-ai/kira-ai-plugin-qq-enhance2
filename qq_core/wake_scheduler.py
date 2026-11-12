@@ -134,7 +134,8 @@ class WakeScheduler:
         from .emoji_display import format_emoji_list
         emoji_str = format_emoji_list(emoji_ids, count)
         # 对齐框架 [Emoji {desc} (ID: {id})] 格式：bot 拿到 ID 才能回贴
-        text = f"[System 用户{event.actor}({event.actor_name}) 给用户{message_author}({message_author_name})的消息贴了 {emoji_str}"
+        from .fmt import fmt_user
+        text = f"[System {fmt_user(event.actor, event.actor_name)} 给 {fmt_user(message_author, message_author_name)} 的消息贴了 {emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -254,6 +255,7 @@ class WakeScheduler:
             "count": event.extra.get("times", 1),
             "first_ts": now,
             "last_ts": now,
+            "name": event.actor_name or "",
         }
         self._schedule_like_settle(sid, operator)
         return False
@@ -286,13 +288,15 @@ class WakeScheduler:
             return
         count = acc["count"]
         duration = max(time.time() - acc["first_ts"], 1.0)
+        actor_name = acc.get("name", "")
         # 先清空再触发，避免重入
         self._like_accumulator[sid].pop(operator, None)
         if not self._like_accumulator[sid]:
             self._like_accumulator.pop(sid, None)
-        await self._trigger_like_summary(sid, operator, count, duration)
+        await self._trigger_like_summary(sid, operator, count, duration, actor_name)
 
-    async def _trigger_like_summary(self, sid: str, operator: str, count: int, duration: float):
+    async def _trigger_like_summary(self, sid: str, operator: str, count: int,
+                                    duration: float, actor_name: str = ""):
         """触发点赞汇总唤醒。
 
         Args:
@@ -300,9 +304,11 @@ class WakeScheduler:
             operator: 点赞用户 QQ。
             count: 累计次数。
             duration: 累计时长（秒）。
+            actor_name: 点赞用户昵称（可为空）。
         """
-        # 构造唤醒文本
-        text = f"[System 用户{operator} 赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
+        from .fmt import fmt_user
+        # 构造唤醒文本（带昵称，对齐框架 用户{QQ}({昵称}) 格式）
+        text = f"[System {fmt_user(operator, actor_name)} 赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
         await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator)
 
     async def trigger_emoji_like_self(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
@@ -318,7 +324,8 @@ class WakeScheduler:
         count = event.extra.get("count", 1)
         from .emoji_display import format_emoji_list
         emoji_str = format_emoji_list(emoji_ids, count)
-        text = f"[System 用户{event.actor}({event.actor_name}) 给你贴了 {emoji_str}"
+        from .fmt import fmt_user
+        text = f"[System {fmt_user(event.actor, event.actor_name)} 给你贴了 {emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -327,12 +334,21 @@ class WakeScheduler:
     async def trigger_title_self(self, event: QQEvent):
         """触发"头衔授予"唤醒。"""
         title = event.extra.get("title", "")
-        text = f"[System 用户{event.actor}({event.actor_name}) 给你授予头衔\"{title}\"]"
+        from .fmt import fmt_user
+        text = f"[System {fmt_user(event.actor, event.actor_name)} 给你授予头衔\"{title}\"]"
         await self._trigger_text(event.sid, text, "title_self", actor_qq=event.actor)
 
     async def trigger_kicked_self(self, event: QQEvent):
-        """触发"被移出群"唤醒。"""
-        text = f"[System 你被移出群聊]"
+        """触发"被移出群"唤醒。
+
+        注意：必须带上操作者（谁踢的），否则 bot 无法判断是被管理员踢出
+        还是自己退群，也无法在后续对话中理解上下文。
+        """
+        from .fmt import fmt_user
+        if event.actor:
+            text = f"[System 你被 {fmt_user(event.actor, event.actor_name)} 移出群聊]"
+        else:
+            text = "[System 你被移出群聊]"
         await self._trigger_text(event.sid, text, "kicked_self", actor_qq=event.actor)
 
     def _get_supported_elements(self, adapter_info) -> list[str]:

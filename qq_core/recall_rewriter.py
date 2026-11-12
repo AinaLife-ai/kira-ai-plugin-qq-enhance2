@@ -93,10 +93,9 @@ class RecallRewriter:
                 # 按 recall_show_content 决定是否带原文
                 annotation = recall_info.get("annotation", "")
                 if not recall_show_content:
-                    # 不显示原文：只保留"谁撤回了什么"，去掉原文引用
+                    # 不显示原文：去掉形如（"原文摘要"）的引用片段
                     import re as _re
                     annotation = _re.sub(r'（"[^"]*"）', "", annotation)
-                    annotation = annotation.replace("撤回此消息", "撤回了一条消息")
 
                 # 检查是否已追加（幂等）
                 if annotation in p.content:
