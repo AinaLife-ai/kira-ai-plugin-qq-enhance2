@@ -166,6 +166,41 @@ def _install_framework_stubs():
     class _PluginContext:
         pass
     plugin_pkg.PluginContext = _PluginContext
+
+    # BasePlugin（main.py 需要）
+    class _BasePlugin:
+        def __init__(self, ctx=None, cfg=None):
+            self.ctx = ctx
+            self.plugin_cfg = cfg or {}
+        async def initialize(self):
+            pass
+        async def terminate(self):
+            pass
+    plugin_pkg.BasePlugin = _BasePlugin
+
+    # logger（main.py 用 core.plugin.logger）
+    plugin_pkg.logger = _Logger()
+
+    # on / Priority（hook 装饰器）
+    class _Priority:
+        SYS_LOW = -100
+        LOW = -50
+        MEDIUM = 0
+        HIGH = 50
+        SYS_HIGH = 100
+    plugin_pkg.Priority = _Priority
+
+    class _On:
+        """mock 装饰器集合：原样返回函数并记录事件类型。"""
+        def __getattr__(self, name):
+            def deco(*a, **k):
+                def wrap(func):
+                    func._hook = name
+                    return func
+                return wrap
+            return deco
+    plugin_pkg.on = _On()
+
     sys.modules["core.plugin"] = plugin_pkg
 
     # core.utils.tool_utils.BaseTool（工具基类）

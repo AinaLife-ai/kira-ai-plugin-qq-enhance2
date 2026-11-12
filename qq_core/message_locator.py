@@ -146,11 +146,16 @@ class MessageLocator:
                     text = str((seg.get("data") or {}).get("text") or "")
                     break
             is_self = (sender == cur_self_id) if cur_self_id else False
+            # time 可能是字符串/异常值 → 安全转换，失败则用当前时间
+            try:
+                ts_val = int(data.get("time") or time.time())
+            except (TypeError, ValueError):
+                ts_val = int(time.time())
             result = {
                 "sender": sender,
                 "sender_name": sender_name,
                 "text": text[:500],
-                "ts": int(data.get("time") or time.time()),
+                "ts": ts_val,
                 "is_self": is_self,
             }
             # 写入 L1

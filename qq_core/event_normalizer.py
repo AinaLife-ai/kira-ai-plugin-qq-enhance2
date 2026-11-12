@@ -117,7 +117,12 @@ def normalize_notice(
     user_id = _uid(raw, "user_id")
     target_id = _uid(raw, "target_id")
     operator_id = _uid(raw, "operator_id")
-    ts = int(raw.get("time") or (now if now is not None else time.time()))
+    # time 可能是字符串/异常值 → 安全转换，失败则用当前时间
+    _raw_ts = raw.get("time") or (now if now is not None else time.time())
+    try:
+        ts = int(float(_raw_ts))
+    except (TypeError, ValueError):
+        ts = int(now if now is not None else time.time())
     self_id = _s(self_id)
 
     # ---- 戳一戳 ----

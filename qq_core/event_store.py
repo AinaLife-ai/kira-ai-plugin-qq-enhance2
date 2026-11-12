@@ -223,16 +223,25 @@ class EventStore:
                     continue
                 ev_list = []
                 for ev_data in events:
+                    if not isinstance(ev_data, dict):
+                        continue
+                    try:
+                        ts_val = int(ev_data.get("ts", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue  # 单条坏数据跳过，不影响同文件其他事件
+                    extra_val = ev_data.get("extra")
+                    if not isinstance(extra_val, dict):
+                        extra_val = {}
                     ev = QQEvent(
                         eid=ev_data.get("eid", ""),
                         etype=ev_data.get("etype", ""),
                         sid=ev_data.get("sid", ""),
-                        ts=int(ev_data.get("ts", 0)),
+                        ts=ts_val,
                         actor=ev_data.get("actor", ""),
                         actor_name=ev_data.get("actor_name", ""),
                         target=ev_data.get("target", ""),
                         target_name=ev_data.get("target_name", ""),
-                        extra=ev_data.get("extra", {}),
+                        extra=extra_val,
                     )
                     ev_list.append(ev)
                 # 清理过期事件
@@ -246,5 +255,7 @@ class EventStore:
                 if ev_list:
                     async with self._lock:
                         self._store[sid] = ev_list
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError, ValueError, TypeError, KeyError):
+                # 文件损坏/字段类型异常时跳过该文件，不影响其他会话
+                # （原来只捕获 OSError/JSONDecodeError，字段类型错误会让整个加载崩）
                 continue

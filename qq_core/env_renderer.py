@@ -228,7 +228,12 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         parts = []
         now = time.time()
         for ev in events:
-            duration = ev.extra.get("duration", 0) or 0
+            # duration 归一化：normalizer 通常已转 int，但落盘/外部构造可能是
+            # 字符串或 None → 统一转 int，避免 `duration > 0` 比较崩溃
+            try:
+                duration = int(float(ev.extra.get("duration", 0) or 0))
+            except (TypeError, ValueError):
+                duration = 0
             part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
             if duration > 0:
                 part += f" {duration}秒"

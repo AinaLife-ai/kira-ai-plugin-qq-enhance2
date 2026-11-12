@@ -1,10 +1,15 @@
 """QQ增强2 插件入口：hook 注册、模块装配。
 
 功能：
-1. 感知层：im_message(HIGH) 收集他人事件 → event_store；llm_request(LOW) 注入环境摘要。
+1. 感知层：im_message(LOW) 收集他人事件 → event_store；llm_request(LOW) 注入环境摘要。
 2. 唤醒层：唤醒级事件 → wake_scheduler.trigger() → 进入会话 buffer（批次合并）。
-3. 撤回改写：llm_request 阶段追加撤回标注。
+3. 撤回/贴表情改写：llm_request 阶段在原文后追加标注。
 4. 工具层：qq_profile / qq_group_profile / fetch_emoji_like。
+
+优先级说明：
+- im_message 用 LOW(-50)：在 S/Z/anti-harass/QQ增强1（HIGH 及以上）之后执行，
+  避免同优先级时执行顺序不确定。
+- llm_request 用 LOW：最后注入，保证环境摘要位于 user_prompt 最前。
 """
 
 from __future__ import annotations
@@ -28,6 +33,9 @@ from .tools.qq_profile import QQProfileTool
 from .tools.qq_group_profile import QQGroupProfileTool
 from .tools.fetch_emoji_like import FetchEmojiLikeTool
 
+# 数值配置安全转换（用户手改配置 / WebUI 存成字符串时不崩）
+from .qq_core.fmt import safe_int as _safe_int, safe_float as _safe_float
+
 
 class QQEnhance2Plugin(BasePlugin):
     """QQ增强2 主插件类。"""
@@ -47,27 +55,30 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.wake_self_emoji = self.plugin_cfg.get("wake_self_emoji", True)
         self.wake_others_emoji = self.plugin_cfg.get("wake_others_emoji", False)
-        self.wake_others_emoji_cooldown = int(self.plugin_cfg.get("wake_others_emoji_cooldown", 20))
+        # 数值配置用安全转换：用户手改配置文件或 WebUI 存成字符串时不应崩
+        self.wake_others_emoji_cooldown = _safe_int(
+            self.plugin_cfg.get("wake_others_emoji_cooldown"), 20)
         self.wake_profile_like = self.plugin_cfg.get("wake_profile_like", True)
         self.wake_title = self.plugin_cfg.get("wake_title", True)
         self.wake_kicked = self.plugin_cfg.get("wake_kicked", True)
-        self.profile_like_merge_window_seconds = int(self.plugin_cfg.get("profile_like_merge_window_seconds", 10))
-        self.wake_quiet_hours = self.plugin_cfg.get("wake_quiet_hours", "")
-        self.wake_max_per_hour = int(self.plugin_cfg.get("wake_max_per_hour", 60))
+        self.profile_like_merge_window_seconds = _safe_int(
+            self.plugin_cfg.get("profile_like_merge_window_seconds"), 10)
+        self.wake_quiet_hours = self.plugin_cfg.get("wake_quiet_hours", "") or ""
+        self.wake_max_per_hour = _safe_int(self.plugin_cfg.get("wake_max_per_hour"), 60)
 
-        self.perceive_window_seconds = int(self.plugin_cfg.get("perceive_window_seconds", 1800))
-        self.perceive_max_events = int(self.plugin_cfg.get("perceive_max_events", 20))
-        self.perceive_max_per_type = int(self.plugin_cfg.get("perceive_max_per_type", 6))
-        self.env_max_chars = int(self.plugin_cfg.get("env_max_chars", 800))
-        self.env_inject_min_interval = int(self.plugin_cfg.get("env_inject_min_interval", 0))
-        self.env_ttl_hours = int(self.plugin_cfg.get("env_ttl_hours", 24))
+        self.perceive_window_seconds = _safe_int(self.plugin_cfg.get("perceive_window_seconds"), 1800)
+        self.perceive_max_events = _safe_int(self.plugin_cfg.get("perceive_max_events"), 20)
+        self.perceive_max_per_type = _safe_int(self.plugin_cfg.get("perceive_max_per_type"), 6)
+        self.env_max_chars = _safe_int(self.plugin_cfg.get("env_max_chars"), 800)
+        self.env_inject_min_interval = _safe_int(self.plugin_cfg.get("env_inject_min_interval"), 0)
+        self.env_ttl_hours = _safe_int(self.plugin_cfg.get("env_ttl_hours"), 24)
 
         self.recall_rewrite = self.plugin_cfg.get("recall_rewrite", True)
         self.recall_show_content = self.plugin_cfg.get("recall_show_content", True)
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
-        self.avatar_desc_timeout = float(self.plugin_cfg.get("avatar_desc_timeout", 20) or 20)
+        self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
         self.debug_log = self.plugin_cfg.get("debug_log", False)

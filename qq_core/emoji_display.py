@@ -37,22 +37,28 @@ def format_emoji(emoji_id: str) -> str:
     return f"ID: {emoji_id}"
 
 
-def format_emoji_list(emoji_ids: list[str], count: int = 1) -> str:
+def format_emoji_list(emoji_ids: list[str], count=1) -> str:
     """格式化表情列表（合并场景，带次数）。
 
     Args:
-        emoji_ids: 表情 ID 列表。
-        count: 总次数（>1 时附加 ×N）。
+        emoji_ids: 表情 ID 列表（可能为 None / 非列表）。
+        count: 总次数（>1 时附加 ×N）。可能是字符串/None（协议端或
+               落盘数据异常），会安全转换。
 
     Returns:
         格式化文本，如 `🔥 (ID: 128077) ×2`。
     """
-    if not emoji_ids:
+    if not emoji_ids or not isinstance(emoji_ids, (list, tuple)):
         return "?"
-    parts = [format_emoji(e) for e in emoji_ids if e]
+    parts = [format_emoji(str(e)) for e in emoji_ids if e]
     if not parts:
         return "?"
     text = "/".join(parts)
-    if count > 1:
-        text += f"×{count}"
+    # count 安全转换（可能是 "2" / None / "abc"）
+    try:
+        n = int(float(count))
+    except (TypeError, ValueError):
+        n = 1
+    if n > 1:
+        text += f"×{n}"
     return text

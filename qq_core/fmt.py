@@ -33,6 +33,45 @@ def fmt_user(qq: str, name: str = "") -> str:
     return "用户(未知)"
 
 
+def safe_int(val, default: int) -> int:
+    """安全转 int（用户手改配置 / WebUI 存成字符串时不应崩）。
+
+    Args:
+        val: 原始值（可能是 int / "20" / None / "abc"）。
+        default: 转换失败时的回退值。
+
+    Returns:
+        整数值。
+    """
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        try:
+            return int(float(val))  # "20.0" -> 20
+        except (TypeError, ValueError):
+            return default
+
+
+def safe_float(val, default: float) -> float:
+    """安全转 float。
+
+    Args:
+        val: 原始值。
+        default: 转换失败时的回退值。
+
+    Returns:
+        浮点值。
+    """
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 # 协议端（NapCat/LLOneBot 的 uriToLocalFile）支持的 file 前缀
 _FILE_URI_PREFIXES = ("base64://", "data:", "http://", "https://", "file://")
 

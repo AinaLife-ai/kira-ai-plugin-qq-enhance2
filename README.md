@@ -100,8 +100,17 @@
 ## 安装
 
 1. 下载本仓库代码。
-2. 将 `manifest.json` / `schema.json` / `main.py` / `core/` / `tools/` / `icon.png` 复制到 KiraAI 的 `data/plugins/kira-ai-plugin-qq-enhance2/` 目录。
+2. 将 `manifest.json` / `schema.json` / `main.py` / `qq_core/` / `tools/` / `icon.png` 复制到 KiraAI 的 `data/plugins/kira-ai-plugin-qq-enhance2/` 目录。
 3. 在 WebUI 插件管理中启用。
+
+### 注意事项
+
+- **修改配置后需重载插件**：框架不会热更新插件配置（`cfg` 仅在实例化时传入一次）。
+  在 WebUI 中改完配置后，请禁用再启用本插件（或重启框架）。
+- **多 QQ 号部署**：支持多适配器，每个号的 notice 会用自己账号的 `self_id` 判断，
+  工具也绑定到当前会话所属账号（不会用错号发 API）。
+- **数据存储**：`data/plugin_data/kira-ai-plugin-qq-enhance2/` 下按会话存 JSON
+  （每会话最多 20 条事件，30 秒落盘一次，24 小时 TTL）。
 
 ## 许可
 
