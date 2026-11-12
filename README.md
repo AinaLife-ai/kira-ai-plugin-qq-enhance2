@@ -173,6 +173,27 @@
 ## 更新日志
 
 <details>
+<summary><b>v1.1.4</b>（2026-11-14）— 点赞诊断 + 字段兜底</summary>
+
+### 🔍 资料卡点赞：加一条"收到即打印"的诊断日志
+```
+[QQ增强2] 收到资料卡点赞: adapter=… operator=… times=… 框架会话=…
+```
+用途：区分"协议端没发事件"和"发了但唤醒链路有问题"。
+
+### 🛠 点赞者字段兜底
+`profile_like` 的点赞者字段按 `operator_id → user_id → target_id` 依次取，
+避免某些实现把点赞者放在 `user_id` 时 actor 为空、会话解析成非法的 `dm:`。
+
+### 📌 关于 SnowLuma
+实测 SnowLuma 1.14.20 的打包产物里**已经包含**完整链路
+（`convertFriendProfileLike` → `friend_profile_like: { handle: convertOnly }` →
+`decodeProfileLike`，条件 `msgType=0 && subType=203`），
+所以插件侧不是"没适配"；若实机收不到事件，需协议端排查（或升级）。
+
+</details>
+
+<details>
 <summary><b>v1.1.3</b>（2026-11-13）— 实机问题修复</summary>
 
 ### 🐛 资料卡点赞落到 `qq:dm:None` 幽灵会话

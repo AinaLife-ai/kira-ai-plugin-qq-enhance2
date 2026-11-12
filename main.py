@@ -700,6 +700,11 @@ class QQEnhance2Plugin(BasePlugin):
         if qq_event.etype == E_PROFILE_LIKE_SELF:
             # 资料卡点赞：协议端不给 group_id，框架会建出 qq:dm:None 的幽灵会话 →
             # 这里换成"用户最近活跃的会话"（群或私聊），bot 的回复才有人看得到
+            logger.info(
+                f"[QQ增强2] 收到资料卡点赞: adapter={adapter_name} "
+                f"operator={qq_event.actor or '(空)'} times={qq_event.extra.get('times')} "
+                f"框架会话={sid}"
+            )
             qq_event.sid = self._resolve_like_sid(adapter_name, raw, qq_event.actor)
             await self.wake_scheduler.on_profile_like(qq_event)
             return

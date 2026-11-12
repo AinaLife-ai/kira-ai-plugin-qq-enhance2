@@ -292,8 +292,11 @@ def normalize_notice(
             times = int(times)
         except (TypeError, ValueError):
             times = 1
+        # 点赞者字段：NapCat/SnowLuma 用 operator_id；部分实现（LLOneBot 变体）
+        # 可能放在 user_id → 兜底，避免 actor 为空导致会话解析成 `dm:`
+        who = operator_id or user_id or target_id
         return QQEvent(eid=_eid(), etype=E_PROFILE_LIKE_SELF, sid=sid, ts=ts,
-                       actor=operator_id, extra={"times": times})
+                       actor=who, extra={"times": times})
 
     # ---- 头衔授予 ----
     if notice_type == "notify" and sub_type == "title":
