@@ -184,6 +184,13 @@
 只换填充色 `#1EBAFC → #F8A5C2`，透明背景、图形 432×512 满幅 ——
 和 QQ增强1 **逐像素同轮廓**（alpha 差异 0），就是换了个颜色。
 
+### 🐛 顺带修复：唤醒事件的 `supported_elements` 只有 `["text"]`
+适配器实例没有 `.name` 属性（只有 `.info.name`），旧代码按 `.name` 取实例失败 →
+唤醒事件只注册了 text tag，唤醒轮里 LLM 输出 `<img>` / `<at>` / `<reply>` 会被丢掉。
+现在兼容 AdapterInfo / 适配器实例两种入参，能拿到完整列表
+（`text/img/at/reply/record/emoji/sticker/poke/file/video/forward`）。
+（同时合并了 `WakeScheduler` 里重复定义两次的 `_get_supported_elements`。）
+
 ### 🗑 移除：`fetch_emoji_like` 工具
 唤醒通知本身已带"谁贴的 + 表情 ID + 次数"，该工具只剩查历史名单的增量价值，
 性价比低。工具数 3 → 2（`qq_profile` / `qq_group_profile`）。

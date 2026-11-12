@@ -485,35 +485,61 @@ class WakeScheduler:
         await self._trigger_text(event.sid, text, "kicked_self",
                                 actor_qq=event.actor, actor_name=event.actor_name)
 
-    def _get_supported_elements(self, adapter_info) -> list[str]:
-        """获取适配器支持的消息元素类型（用于构造唤醒事件）。
+    def _get_supported_elements(self, adapter_info, ctx=None) -> list[str]:
+        """获取适配器支持的消息元素类型（唤醒事件用）。
+
+        唤醒事件需要正确的 `supported_elements`，否则 assemble 阶段不会注册
+        对应 tag（text/img/at/reply/emoji…），LLM 输出 `<img>`、`<at>` 会被丢掉。
+
+        入参可能是两种东西：
+          · AdapterInfo（有 supported_elements 字段）
+          · 适配器实例（`ctx.adapter_mgr.get_adapter(name)` 的返回，实际就是它）
 
         Args:
-            adapter_info: 适配器信息对象。
+            adapter_info: AdapterInfo 或适配器实例。
+            ctx: PluginContext（用于按名字取适配器实例）。
 
         Returns:
-            支持的标签列表；无法确定时回退 ["text"]（至少保证文本可解析）。
+            元素类型列表；都取不到时回退 ["text"]（保证至少能发文本）。
         """
-        # 尝试从适配器实例的元数据获取
+        # 1. 直接字段
         try:
-            adapter = self.ctx.adapter_mgr.get_adapter(adapter_info.name)
-            if adapter is not None:
+            els = getattr(adapter_info, "supported_elements", None)
+            if isinstance(els, (list, tuple)) and els:
+                return list(els)
+        except Exception:
+            pass
+
+        # 2. 定位适配器实例
+        adapter = None
+        try:
+            if hasattr(adapter_info, "message_types") or hasattr(adapter_info, "get_capability"):
+                adapter = adapter_info
+            else:
+                name = (getattr(adapter_info, "name", None)
+                        or getattr(getattr(adapter_info, "info", None), "name", None))
+                if ctx is not None and name:
+                    adapter = ctx.adapter_mgr.get_adapter(name)
+        except Exception:
+            adapter = None
+
+        if adapter is not None:
+            # 2a. 元数据对象（部分实现）
+            try:
                 meta = getattr(adapter, "_metadata", None)
                 elems = getattr(meta, "supported_elements", None)
                 if isinstance(elems, (list, tuple)) and elems:
                     return list(elems)
-                # 部分实现把 metadata 暴露为方法
-                getter = getattr(adapter, "get_message_metadata", None)
-                if callable(getter):
-                    meta2 = getter()
-                    if asyncio.iscoroutine(meta2):
-                        meta2 = asyncio.get_event_loop().run_until_complete(meta2)
-                    elems2 = getattr(meta2, "supported_elements", None)
-                    if isinstance(elems2, (list, tuple)) and elems2:
-                        return list(elems2)
-        except Exception:
-            pass
-        # 回退：至少支持文本
+            except Exception:
+                pass
+            # 2b. IMAdapter.message_types（框架 3.1/3.2 都有；deprecated 但可靠）
+            try:
+                mt = getattr(adapter, "message_types", None)
+                if isinstance(mt, (list, tuple)) and mt:
+                    return list(mt)
+            except Exception:
+                pass
+
         return ["text"]
 
     async def _trigger_text(self, sid: str, text: str, event_type: str,
@@ -736,46 +762,6 @@ class WakeScheduler:
             except Exception:
                 pass
         return self.self_id
-
-    def _get_supported_elements(self, adapter_info, ctx=None) -> list[str]:
-        """获取适配器支持的元素类型列表。
-
-        唤醒事件需要正确的 supported_elements，否则 assemble 阶段不会注册
-        text tag，导致 LLM 输出的 <msg><text> 无法解析。
-
-        查找顺序：
-        1. adapter_info.supported_elements（若存在）
-        2. 通过 ctx.adapter_mgr.get_adapter(name).message_types（QQ 适配器有）
-        3. 回退 ["text"]（唤醒文本一定有 text，这是最小可用集）
-
-        Args:
-            adapter_info: 适配器信息对象。
-            ctx: PluginContext（用于查适配器实例）。
-
-        Returns:
-            元素类型列表。
-        """
-        # 1. 直接字段
-        try:
-            els = getattr(adapter_info, "supported_elements", None)
-            if els:
-                return list(els)
-        except Exception:
-            pass
-
-        # 2. 从适配器实例取（IMAdapter.message_types）
-        try:
-            if ctx is not None:
-                name = getattr(adapter_info, "name", None) or getattr(adapter_info, "adapter_id", None)
-                adapter = ctx.adapter_mgr.get_adapter(name) if name else None
-                mt = getattr(adapter, "message_types", None) if adapter else None
-                if mt:
-                    return list(mt)
-        except Exception:
-            pass
-
-        # 3. 回退：唤醒文本只用 text
-        return ["text"]
 
     async def terminate(self):
         """清理：取消所有待结算的点赞定时器（防任务泄漏）。
