@@ -58,14 +58,22 @@ print("\n=== 边界 1：私聊场景 ===")
 DM_SID = "napcat:dm:1001"
 SELF = "3003003"
 
-# 私聊被戳
+# 私聊被戳（第 15 轮规则：戳 bot 不产生事件 —— 框架自己发 [Poke ...戳了戳你]，
+# 群动态只记"其他用户之间"的互动）
 ev = normalize_notice(
     {"notice_type": "notify", "sub_type": "poke", "user_id": 1001,
      "target_id": 3003003, "time": int(time.time())},
     sid=DM_SID, self_id=SELF,
 )
-check("私聊 poke 归一化成功", ev is not None)
-check("私聊 poke 记录 target=self", ev.target == "3003003" if ev else False)
+check("私聊戳 bot 被忽略（框架负责唤醒，群动态不收）", ev is None)
+
+# 私聊 poke 他人（保留）
+ev = normalize_notice(
+    {"notice_type": "notify", "sub_type": "poke", "user_id": 1001,
+     "target_id": 1002, "time": int(time.time())},
+    sid=DM_SID, self_id=SELF,
+)
+check("私聊 poke 他人保留", ev is not None and ev.target == "1002")
 
 # 私聊撤回（operator 可能为空）
 locator = MessageLocator(adapter=None, self_id=SELF)
@@ -167,7 +175,7 @@ check("不相关消息未被误改", req.user_prompt[0].content == "完全不相
 req2 = LLMRequest()
 req2.user_prompt = [Prompt("较早的历史消息", name="message", source="system")]
 run(rw.rewrite(sid=SID, req=req2))
-check("下一轮补上标注", "[已撤回｜" in req2.user_prompt[0].content,
+check("下一轮补上标注", "↑该条消息" in req2.user_prompt[0].content,
       req2.user_prompt[0].content)
 check("补上后归档清空", len(run(locator2.get_recalls(SID))) == 0)
 

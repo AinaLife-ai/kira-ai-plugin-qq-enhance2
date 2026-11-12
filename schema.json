@@ -151,11 +151,23 @@
         "default": true,
         "hint": "关=只显示'某条消息被撤回'，不显示原文"
     },
+    "recall_in_env": {
+        "name": "撤回进群动态摘要",
+        "type": "switch",
+        "default": false,
+        "hint": "默认关闭——被撤回的原文已在原消息下标注 [已撤回｜...]，摘要里再写一遍是重复的无效信息。仅当你希望即使原文不在上下文中也能看到撤回事件时才开启"
+    },
     "tools_profile": {
         "name": "启用资料工具",
         "type": "switch",
         "default": true,
         "hint": "启用 qq_profile / qq_group_profile 工具"
+    },
+    "avatar_describe": {
+        "name": "查询资料时识别头像",
+        "type": "switch",
+        "default": true,
+        "hint": "开启后查询资料会用视觉模型「看」头像并给出描述（每次调用消耗 VLM token/几秒延迟）；关闭则只返回头像链接。即使开启，bot 也可以按次传 look_avatar=false 跳过识别"
     },
     "avatar_desc_prompt": {
         "name": "头像描述提示词",
@@ -175,6 +187,18 @@
         "type": "switch",
         "default": true,
         "hint": "启用 fetch_emoji_like 工具"
+    },
+    "resolve_nickname": {
+        "name": "补全事件昵称",
+        "type": "switch",
+        "default": true,
+        "hint": "框架的 notice 事件只带发起人昵称，被戳/被禁言/被贴表情的 target 没有昵称。开启后自动查询补全（带 10 分钟缓存），关闭则 target 只显示 QQ 号"
+    },
+    "poke_action_text": {
+        "name": "戳一戳使用真实动作文案",
+        "type": "switch",
+        "default": false,
+        "hint": "默认关闭——统一显示为「戳了戳」，与框架的归一化解析保持一致。开启后按协议端原文显示（拍了拍 / 摸了摸 等）"
     },
     "debug_log": {
         "name": "调试日志",

@@ -133,8 +133,9 @@ def test_bug35_text_cache_length():
 def test_bug36_kicked_with_actor():
     """被踢唤醒应带操作者。"""
     src = (PLUGIN_ROOT / "qq_core" / "wake_scheduler.py").read_text(encoding="utf-8")
-    assert "你被 {fmt_user(event.actor, event.actor_name)} 移出群聊" in src, \
-        "被踢唤醒应带操作者"
+    # 对齐 QQ增强1/框架格式：用户X(昵称) 后不留空格
+    assert "你被{fmt_user(event.actor, event.actor_name)}移出群聊" in src, \
+        "被踢唤醒应带操作者（且格式对齐框架：无多余空格）"
     print("  ✓ Bug36: 被踢唤醒带操作者")
 
 

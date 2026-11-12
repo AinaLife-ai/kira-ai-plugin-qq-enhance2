@@ -82,9 +82,9 @@ def test_rewrite():
     _run(rewrite_emoji_like(sid="test:sid2", req=req, enabled=True))
 
     # 第一条消息应追加标注
-    assert "[贴表情｜用户1001(张三)" in req.user_prompt[0].content
+    assert "↑该条消息被贴了" in req.user_prompt[0].content and "张三" in req.user_prompt[0].content
     # 第二条消息不应有标注
-    assert "贴表情" not in req.user_prompt[1].content
+    assert "↑该条消息被贴了" not in req.user_prompt[1].content
 
 
 def test_idempotent():

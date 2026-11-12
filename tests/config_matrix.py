@@ -395,10 +395,10 @@ async def test_recall_cfg():
 
     c_on = await run_case(True, True)
     c_off = await run_case(False, True)
-    check(f"recall_rewrite 开：有标注（{bool('[已撤回' in c_on)}）",
-          "[已撤回" in c_on, c_on)
-    check(f"recall_rewrite 关：无标注（{bool('[已撤回' in c_off)}）",
-          "[已撤回" not in c_off, c_off)
+    check(f"recall_rewrite 开：有标注（{bool('↑该条消息' in c_on)}）",
+          "↑该条消息" in c_on, c_on)
+    check(f"recall_rewrite 关：无标注（{bool('↑该条消息' in c_off)}）",
+          "↑该条消息" not in c_off, c_off)
 
 
 asyncio.run(test_recall_cfg())

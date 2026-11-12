@@ -67,6 +67,7 @@ def render_env_summary(
     *,
     max_per_type: int = 6,
     max_chars: int = 800,
+    poke_action_text: bool = False,
 ) -> str:
     """渲染环境摘要（分层预算 + 踢旧淘汰）。
 
@@ -105,7 +106,8 @@ def render_env_summary(
         parts = []
         for et in order:
             subset = by_t[et] if et in merge_types else by_t[et][:max_per_type]
-            rendered = _render_type(et, subset, all_events=evts)
+            rendered = _render_type(et, subset, all_events=evts,
+                                    poke_action_text=poke_action_text)
             if rendered:
                 parts.append(rendered)
         if not parts:
@@ -124,7 +126,9 @@ def render_env_summary(
     return candidate
 
 
-def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | None = None) -> str:
+def _render_type(etype: str, events: list[QQEvent],
+                 all_events: list[QQEvent] | None = None,
+                 poke_action_text: bool = False) -> str:
     """渲染单个类型的事件（已排序，新事件在前）。
 
     Args:
@@ -140,6 +144,9 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         pair_count: dict[tuple[str, str], int] = {}
         actor_names: dict[str, str] = {}
         target_names: dict[str, str] = {}
+        # 动作文案：优先用协议端给的（NapCat raw_info / SnowLuma action）
+        # 如"拍了拍""戳了戳"，取不到时回退默认"戳了戳"
+        pair_action: dict[tuple[str, str], str] = {}
         for ev in events:
             key = (ev.actor, ev.target)
             pair_count[key] = pair_count.get(key, 0) + 1
@@ -147,6 +154,12 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                 actor_names[ev.actor] = ev.actor_name
             if ev.target:
                 target_names[ev.target] = ev.target_name
+            # 默认（poke_action_text=False）归一为"戳了戳"，与框架的归一解析保持一致；
+            # 开启后才用协议端真实文案（拍了拍 / 摸了摸 等）
+            if poke_action_text:
+                act = str(ev.extra.get("raw_action") or "").strip()
+                if act and key not in pair_action:
+                    pair_action[key] = act
 
         # 按 target 归并
         by_target: dict[str, list[tuple[str, int]]] = {}
@@ -159,7 +172,8 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
             total = sum(c for _, c in lst)
             if len(lst) == 1:
                 actor, cnt = lst[0]
-                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} 戳了戳 {_fmt_user(target, tname)}"
+                act = pair_action.get((actor, target), "") or "戳了戳"
+                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} {act} {_fmt_user(target, tname)}"
                 if cnt > 1:
                     part += f"×{cnt}"
             else:
@@ -169,7 +183,11 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                     for a, _ in lst[:3]
                 ]
                 more = f"等{len(lst)}人" if len(lst) > 3 else ""
-                part = f"{'、'.join(names)}{more} 戳了戳 {_fmt_user(target, tname)}"
+                # 多人时动作可能不同，用最常见的那个
+                acts = [pair_action.get((a, target), "") for a, _ in lst]
+                acts = [a for a in acts if a]
+                act = max(set(acts), key=acts.count) if acts else "戳了戳"
+                part = f"{'、'.join(names)}{more} {act} {_fmt_user(target, tname)}"
                 if total > len(lst):
                     part += f"（共{total}次）"
             parts.append(part)
@@ -234,7 +252,11 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                 duration = int(float(ev.extra.get("duration", 0) or 0))
             except (TypeError, ValueError):
                 duration = 0
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
+            if ev.actor:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
+            else:
+                # 协议端没给 operator_id 时不要渲染成"被 用户(未知) 禁言"
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被禁言"
             if duration > 0:
                 part += f" {duration}秒"
             # 配对解除事件（同 target，时间晚于本次 ban）
@@ -262,7 +284,10 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         for ev in events:
             if ev.target in ban_targets:
                 continue  # 已由 E_BAN 分支配对显示
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
+            if ev.actor:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
+            else:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被解除禁言"
             parts.append(part)
         return "；".join(parts)
 
@@ -270,7 +295,8 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         parts = []
         for ev in events:
             sub = ev.extra.get("sub_type", "")
-            if sub == "kick":
+            # 注意 kick_me 是"被踢的人（通常是 bot）"，个别协议端会给他人也标 kick_me
+            if sub in ("kick", "kick_me"):
                 action = "被移出群聊"
             elif sub == "leave":
                 action = "退群"
@@ -292,7 +318,9 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         parts = []
         for key, lst in by_actor.items():
             ev0 = lst[0]
-            who = _fmt_user(ev0.actor, ev0.actor_name)
+            # 私聊撤回常常没有 operator_id → 用被撤回消息的作者兜底，
+            # 否则会渲染出"用户(未知) 撤回了一条消息"
+            who = _fmt_user(ev0.actor or ev0.target, ev0.actor_name or ev0.target_name)
             # 区分操作者身份：撤回自己 vs 撤回他人
             if ev0.actor and ev0.target and ev0.actor != ev0.target:
                 detail = "撤回了他人消息"

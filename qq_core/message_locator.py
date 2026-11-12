@@ -206,12 +206,12 @@ class MessageLocator:
 
         if not operator or operator == sender:
             # 自己撤回 或 无操作者信息（私聊常见）
-            action_desc = "撤回了一条消息"
+            action_desc = "已撤回"
             role_prefix = ""
         else:
             # 他人撤回（管理员/群主/其他）→ 检查具体角色
             role = await self._get_group_member_role(sid, operator)
-            action_desc = "撤回了一条消息"
+            action_desc = "已被撤回"
             if role == "owner":
                 role_prefix = "（群主）"
             elif role == "admin":
@@ -222,9 +222,11 @@ class MessageLocator:
         # 标注格式：用户{QQ}({昵称}){角色前缀} {动作}
         # 例：[已撤回｜用户8888(管理员A)（管理员） 撤回了一条消息]
         if role_prefix:
-            annotation = f"\n[已撤回｜{_fmt_user(effective_operator, effective_operator_name)}{role_prefix} {action_desc}]"
+            annotation = (f"\n↑该条消息{action_desc}"
+                          f"（{_fmt_user(effective_operator, effective_operator_name)}{role_prefix} 操作）")
         else:
-            annotation = f"\n[已撤回｜{_fmt_user(effective_operator, effective_operator_name)} {action_desc}]"
+            annotation = (f"\n↑该条消息{action_desc}"
+                          f"（{_fmt_user(effective_operator, effective_operator_name)} 操作）")
 
         async with self._lock:
             recall_list = self._recall_store.setdefault(sid, [])

@@ -64,51 +64,64 @@ class RecallRewriter:
         if not recalls:
             return
 
-        # 遍历 user_prompt 中 name=="message" 的 Prompt
         handled_ids: set[str] = set()  # 已成功追加标注的 message_id
-        for p in req.user_prompt:
-            if not isinstance(p, Prompt):
-                continue
-            if p.name != "message" or p.source != "system":
-                continue
-            if not isinstance(p.content, str):
-                continue
 
-            # 定位被撤回消息的原文
+        def _try_rewrite(text: str) -> tuple[str, set]:
+            """在给定文本里匹配所有撤回归档，返回 (新文本, 命中的 message_id)。"""
+            hit: set[str] = set()
             for recall_info in recalls:
                 original_text = recall_info.get("text", "")
                 if not original_text:
                     continue
-
-                # 检查原文是否在 Prompt 中（取前 50 字做匹配键；
-                # 同时要求匹配位置唯一，避免相似消息误伤）
+                # 取前 50 字做匹配键；要求唯一命中，避免相似消息误伤
                 match_key = original_text[:50] if len(original_text) >= 50 else original_text
-                if match_key not in p.content:
+                if match_key not in text:
                     continue
-                if p.content.count(match_key) > 1:
-                    # 多个位置命中：无法唯一定位，跳过（保守）
+                if text.count(match_key) > 1:
                     logger.debug(f"[QQ增强2] 撤回原文匹配到多处，跳过: {match_key[:20]}")
                     continue
 
-                # 按 recall_show_content 决定是否带原文
                 annotation = recall_info.get("annotation", "")
                 if not recall_show_content:
                     # 不显示原文：去掉形如（"原文摘要"）的引用片段
                     import re as _re
                     annotation = _re.sub(r'（"[^"]*"）', "", annotation)
 
-                # 检查是否已追加（幂等）
-                if annotation in p.content:
-                    handled_ids.add(recall_info.get("message_id", ""))
+                mid = recall_info.get("message_id", "")
+                # 幂等：已追加过就不再重复
+                if annotation in text or recall_info.get("annotation", "") in text:
+                    hit.add(mid)
                     continue
-                if recall_info.get("annotation", "") in p.content:
-                    handled_ids.add(recall_info.get("message_id", ""))
-                    continue
+                text = text + annotation
+                hit.add(mid)
+                logger.debug(f"[QQ增强2] 撤回标注已追加: sid={sid}, message_id={mid}")
+            return text, hit
 
-                # 追加撤回标注
-                p.content += annotation
-                handled_ids.add(recall_info.get("message_id", ""))
-                logger.debug(f"[QQ增强2] 撤回标注已追加: sid={sid}, message_id={recall_info.get('message_id')}")
+        # ① 本轮 user_prompt（Prompt 对象）
+        for p in getattr(req, "user_prompt", []) or []:
+            if not isinstance(p, Prompt):
+                continue
+            if getattr(p, "name", None) != "message" or getattr(p, "source", None) != "system":
+                continue
+            if not isinstance(getattr(p, "content", None), str):
+                continue
+            new_content, hit = _try_rewrite(p.content)
+            if hit:
+                p.content = new_content
+                handled_ids |= hit
+
+        # ② 历史 messages（OpenAIMessage 列表）
+        # 关键：被撤回的消息通常在历史里（不在本轮），只扫 user_prompt 会完全失效。
+        for m in getattr(req, "messages", []) or []:
+            if getattr(m, "role", None) != "user":
+                continue
+            content = getattr(m, "content", None)
+            if not isinstance(content, str):
+                continue
+            new_content, hit = _try_rewrite(content)
+            if hit:
+                m.content = new_content
+                handled_ids |= hit
 
         # 只清空已成功处理的归档（未匹配的保留，等下一轮或过期清理）
         # 注意：不能无条件全清——被撤回消息可能不在本轮 prompt 里，

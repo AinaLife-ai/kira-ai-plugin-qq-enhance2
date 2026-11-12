@@ -56,7 +56,7 @@ class FetchEmojiLikeTool(BaseTool):
     """贴表情查询工具。"""
 
     name = "fetch_emoji_like"
-    description = "拉取指定QQ消息的全部贴表情回应（含贴的人、表情ID、次数）。用于补齐\"谁贴了\"的事实核查。支持分页（cookie 透传）。"
+    description = "拉取指定QQ消息的全部贴表情回应（贴的人/表情ID/次数），支持分页。"
     parameters = {
         "type": "object",
         "properties": {

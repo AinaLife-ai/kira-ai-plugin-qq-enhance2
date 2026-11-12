@@ -203,7 +203,7 @@ def test_e2e_emoji_archive_and_rewrite(plugin_env):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(rewrite_emoji_like(sid="napcat:gm:123456", req=req, enabled=True))
 
-    assert "[贴表情｜用户1001(张三)" in req.user_prompt[0].content, \
+    assert "↑该条消息被贴了" in req.user_prompt[0].content and "张三" in req.user_prompt[0].content, \
         f"应追加标注: {req.user_prompt[0].content}"
     # 标注内容不进 persist 判断（这是 user_prompt 里的 message Prompt，persist=True 是设计如此）
     print(f"  改写后: {req.user_prompt[0].content!r}")
@@ -240,6 +240,6 @@ def test_e2e_recall_rewrite(plugin_env, tmp_path):
     loop.run_until_complete(rewriter.rewrite(sid="napcat:gm:123456", req=req))
 
     content = req.user_prompt[0].content
-    assert "[已撤回｜" in content, f"应追加撤回标注: {content}"
+    assert "↑该条消息" in content and "撤回" in content, f"应追加撤回标注: {content}"
     assert "2002" in content and "李四" in content, f"应含操作者 QQ 和昵称: {content}"
     print(f"  撤回改写: {content!r}")

@@ -218,7 +218,7 @@ def test_bug14_recall_cleared_on_hit():
         return p.content, await locator.get_recalls("s")
 
     content, recalls = _run(scenario())
-    assert "[已撤回｜" in content, f"应追加标注: {content}"
+    assert "↑该条消息" in content and "撤回" in content, f"应追加标注: {content}"
     assert len(recalls) == 0, f"已处理的应清除: {len(recalls)}"
     print("  ✓ Bug14: 匹配成功的撤回归档被清除")
 

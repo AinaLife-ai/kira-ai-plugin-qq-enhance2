@@ -22,13 +22,14 @@ from core.chat.message_utils import KiraMessageBatchEvent, KiraMessageEvent
 from core.provider import LLMRequest
 from core.prompt_manager import Prompt
 
-from .qq_core.event_normalizer import normalize_notice, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF
+from .qq_core.event_normalizer import normalize_notice, involves_self, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF
 from .qq_core.event_store import EventStore
 from .qq_core.env_renderer import render_env_summary
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
 from .qq_core.emoji_rewriter import EmojiRewriter
+from .qq_core.name_resolver import NameResolver
 from .tools.qq_profile import QQProfileTool
 from .tools.qq_group_profile import QQGroupProfileTool
 from .tools.fetch_emoji_like import FetchEmojiLikeTool
@@ -77,10 +78,14 @@ class QQEnhance2Plugin(BasePlugin):
         self.recall_show_content = self.plugin_cfg.get("recall_show_content", True)
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
+        self.avatar_describe = self.plugin_cfg.get("avatar_describe", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
+        self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
+        self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
+        self.poke_action_text = self.plugin_cfg.get("poke_action_text", False)
         self.debug_log = self.plugin_cfg.get("debug_log", False)
 
         # 运行时组件
@@ -91,6 +96,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.wake_scheduler: Optional[WakeScheduler] = None
         self.locator: Optional[MessageLocator] = None
         self.emoji_rewriter: Optional[EmojiRewriter] = None
+        self.name_resolver: Optional[NameResolver] = None
         self.recall_rewriter: Optional[RecallRewriter] = None
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
 
@@ -114,7 +120,7 @@ class QQEnhance2Plugin(BasePlugin):
                 continue
             cfg = (getattr(ada, "config", None)
                    or getattr(info, "config", None) or {})
-            sid_self = str(cfg.get("self_id", "") or "") if isinstance(cfg, dict) else ""
+            sid_self = self._extract_self_id(ada, info, cfg)
             self._adapters[name] = (ada, sid_self)
 
         if not self._adapters:
@@ -164,8 +170,113 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.recall_rewriter = RecallRewriter(locator=self.locator)
         self.emoji_rewriter = EmojiRewriter()
+        self.name_resolver = NameResolver()
 
         logger.info("[QQ增强2] 初始化完成。")
+
+    @staticmethod
+    def _get_self_nickname(adapter) -> str:
+        """取 bot 自己的昵称（框架在登录时缓存在 bot.self_nickname）。
+
+        Args:
+            adapter: 适配器实例。
+
+        Returns:
+            昵称；取不到返回空串。
+        """
+        bot = getattr(adapter, "bot", None)
+        if bot is not None:
+            nm = getattr(bot, "self_nickname", None)
+            if nm:
+                return str(nm).strip()
+        return ""
+
+    @staticmethod
+    def _extract_self_id(ada, info, cfg) -> str:
+        """提取适配器对应账号的 self_id（机器人自己的 QQ 号）。
+
+        **框架 QQ 适配器的配置字段是 `bot_pid`，不是 `self_id`**
+        （见 core/adapter/src/qq/schema.json + qq.py: `bt_uin=self.config["bot_pid"]`）。
+        用错字段会拿到空串 → 所有"这是不是我自己"的判断全部失效
+        （例如 bot 自己戳别人会被当成他人事件记录）。
+
+        提取顺序：
+        1. config["bot_pid"]（框架标准字段）★
+        2. config["self_id"]（部分实现/旧配置）
+        3. ada.bot.self_id（运行时由 bot.run() 设置）
+        4. info.config 里的同名字段
+
+        Args:
+            ada: 适配器实例。
+            info: AdapterInfo。
+            cfg: 已取到的 config dict。
+
+        Returns:
+            self_id 字符串；都取不到时返回空串。
+        """
+        # 1/2. 从 config 取（bot_pid 优先）
+        if isinstance(cfg, dict):
+            for key in ("bot_pid", "self_id", "bot_uin", "uin"):
+                v = cfg.get(key)
+                if v:
+                    return str(v)
+        # 3. 运行时 bot 实例上的 self_id
+        bot = getattr(ada, "bot", None)
+        if bot is not None:
+            v = getattr(bot, "self_id", None)
+            if v:
+                return str(v)
+        # 4. info.config 兜底
+        icfg = getattr(info, "config", None)
+        if isinstance(icfg, dict):
+            for key in ("bot_pid", "self_id"):
+                v = icfg.get(key)
+                if v:
+                    return str(v)
+        return ""
+
+    async def _add_env_event(self, ev, self_id: str) -> bool:
+        """把事件加入群动态存储（**只收"其他用户之间"的事件**）。
+
+        群动态的语义是"群里其他人之间发生了什么"。凡是涉及 bot 自己的事件
+        （别人戳 bot / bot 禁言别人 / 自己的群名片被改 / 别人撤回 bot 的消息……）
+        都不进摘要：
+          · 其中大部分由专门通道处理（唤醒、框架原生 [Poke] 文本、QQ增强1 禁言提醒）；
+          · 剩下的写进摘要只会污染上下文、让模型误以为"有人在对我做某事"。
+
+        Args:
+            ev: 归一化后的事件。
+            self_id: 机器人自己的 QQ 号。
+
+        Returns:
+            True = 已入 store；False = 因涉及自己而跳过。
+        """
+        if involves_self(ev, self_id):
+            if self.debug_log:
+                logger.info(
+                    f"[QQ增强2] 跳过与 bot 相关的事件（不进群动态）: "
+                    f"{ev.etype} actor={ev.actor} target={ev.target}"
+                )
+            return False
+        await self.store.add(ev)
+        return True
+
+    def _env_etypes(self) -> set:
+        """环境摘要要渲染的事件类型。
+
+        注意：**撤回（E_RECALL）默认不进摘要** —— 被撤回的原文已经通过
+        `recall_rewriter` 在原消息下追加了 `[已撤回｜...]` 标注，摘要里再写
+        一遍"X 撤回了一条消息"是重复的无效信息（且会挤占摘要预算）。
+        如需保留，打开 `recall_in_env`。
+
+        Returns:
+            事件类型集合。
+        """
+        types = {E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE,
+                 E_TITLE, E_CARD, E_ADMIN}
+        if self.recall_in_env:
+            types.add(E_RECALL)
+        return types
 
     def _iter_qq_adapters(self):
         """遍历已启动的 QQ 适配器，产出 (adapter_instance, info)。
@@ -284,6 +395,57 @@ class QQEnhance2Plugin(BasePlugin):
         """
         return self._resolve_adapter(adapter_name)[1]
 
+    def _self_id_for_event(self, adapter_name: str, event=None) -> str:
+        """取当前事件所属账号的 self_id（三级兜底 + 自学习）。
+
+        优先级：
+        1. 注册表（initialize 时从 config.bot_pid 提取）
+        2. **事件自带的 self_id** —— 框架每条 KiraIMMessage 都填了
+           （core/adapter/src/qq/im.py 里 `self_id=str(self_id)`），最可靠。
+           注册表因配置字段差异为空时靠这一步兜底：空 self_id 会导致
+           · get_stranger_info(user_id="") 挂满 10 秒超时
+           · "是否自己"判断全部失效（别人戳 bot 被当他人事件、bot 禁言被当他人禁言）
+        3. adapter.bot.self_id（运行时由 bot.run() 设置）
+
+        学到后写回注册表，后续事件零成本。
+
+        Args:
+            adapter_name: 适配器名（sid 第一段）。
+            event: KiraMessageEvent（可选，用于读 message.self_id）。
+
+        Returns:
+            self_id 字符串（可能为空）。
+        """
+        cur = self._resolve_self_id(adapter_name)
+        if cur:
+            return str(cur)
+
+        learned = ""
+        msg = getattr(event, "message", None) if event is not None else None
+        for cand in (
+            getattr(msg, "self_id", "") if msg is not None else "",
+            # KiraMessageBatchEvent 直接暴露 self_id 属性（= messages[-1].self_id）
+            getattr(event, "self_id", "") if event is not None else "",
+            getattr(getattr(self._resolve_adapter(adapter_name)[0], "bot", None), "self_id", ""),
+        ):
+            if cand:
+                learned = str(cand)
+                break
+
+        if learned:
+            # 写回注册表（adapter 实例保持不变）
+            try:
+                ada = self._adapters.get(adapter_name)
+                if ada:
+                    self._adapters[adapter_name] = (ada[0], learned)
+                else:
+                    self._adapters[adapter_name] = (
+                        self._resolve_adapter(adapter_name)[0], learned)
+            except Exception:
+                pass
+            logger.info(f"[QQ增强2] 自学习到 {adapter_name} 的 self_id={learned}")
+        return learned
+
     async def terminate(self):
         """清理资源。"""
         if self.wake_scheduler:
@@ -296,6 +458,8 @@ class QQEnhance2Plugin(BasePlugin):
         # 清空贴表情/撤回归档（模块级全局状态）
         if self.emoji_rewriter:
             self.emoji_rewriter.clear()
+        if self.name_resolver:
+            self.name_resolver.clear()
         logger.info("[QQ增强2] 已停止。")
 
     # ==================== 感知层：im_message 收集他人事件 ====================
@@ -318,6 +482,12 @@ class QQEnhance2Plugin(BasePlugin):
 
         # 只处理 notice 事件
         if not event.is_notice:
+            # 顺便缓存群名（普通消息也带 group_name，成本 0）
+            grp0 = getattr(event.message, "group", None)
+            if self.wake_scheduler and grp0 is not None:
+                self.wake_scheduler.remember_group_name(
+                    str(getattr(grp0, "group_id", "") or ""),
+                    getattr(grp0, "group_name", ""))
             # 记录普通消息到 locator（用于撤回定位）
             if event.message.message_id and event.message.chain:
                 msg_text = " ".join(ele.repr for ele in event.message.chain)
@@ -338,10 +508,18 @@ class QQEnhance2Plugin(BasePlugin):
         group_id = str(raw.get("group_id") or "")
         sid = event.session.sid if hasattr(event.session, 'sid') else f"napcat:gm:{group_id}"
 
+        # 记住群名：唤醒事件是我们自己构造的 KiraMessageEvent，框架不会帮查群名，
+        # 不缓存的话 LLM 每轮看到 `[group_name: None group_id: 188395693 ...]`。
+        if self.wake_scheduler and group_id:
+            grp = getattr(event.message, "group", None)
+            if grp is not None:
+                self.wake_scheduler.remember_group_name(
+                    group_id, getattr(grp, "group_name", ""))
+
         # 多号部署：按事件所属适配器取该号的 self_id
         # （否则会用第一个号的身份判断"是否自己"，导致 group_ban/poke 误判）
         adapter_name = sid.split(":", 1)[0] if ":" in sid else ""
-        cur_self_id = self._resolve_self_id(adapter_name)
+        cur_self_id = self._self_id_for_event(adapter_name, event)
 
         qq_event = normalize_notice(
             raw,
@@ -352,8 +530,10 @@ class QQEnhance2Plugin(BasePlugin):
         if not qq_event:
             return
 
-        # 补昵称：normalizer 只解析字段，昵称由框架在构造 notice 事件时查到
-        # （KiraIMMessage.sender.nickname）。不补的话渲染会出现"用户1005()"空括号。
+        # 补昵称：框架的 notice 事件只填了 sender.nickname（= actor），
+        # **target 的昵称根本没查**（所以会出现"用户769690776(周武) 戳了戳 用户1593462500"）。
+        # 这里两层补全：① 先吃框架已查到的 actor 昵称（零成本）
+        #              ② 缺的（尤其 target）走 NameResolver（带缓存）
         try:
             sender = getattr(event.message, "sender", None)
             if sender and str(getattr(sender, "user_id", "")) == qq_event.actor:
@@ -367,8 +547,25 @@ class QQEnhance2Plugin(BasePlugin):
                     if v:
                         qq_event.actor_name = str(v)
                         break
-        except Exception:
-            pass
+
+            # 走 resolver 补 actor / target 的昵称（内部有缓存，命中零成本）
+            if self.name_resolver and self.resolve_nickname:
+                cur_adapter, _ = self._resolve_adapter(adapter_name)
+                gid_for_name = group_id or ""
+                if qq_event.actor and not qq_event.actor_name:
+                    qq_event.actor_name = await self.name_resolver.resolve(
+                        cur_adapter, adapter_name, gid_for_name, qq_event.actor,
+                    )
+                if qq_event.target and not qq_event.target_name:
+                    # 目标是自己时用 bot 自己的昵称（省一次查询）
+                    if cur_self_id and str(qq_event.target) == str(cur_self_id):
+                        qq_event.target_name = self._get_self_nickname(cur_adapter)
+                    if not qq_event.target_name:
+                        qq_event.target_name = await self.name_resolver.resolve(
+                            cur_adapter, adapter_name, gid_for_name, qq_event.target,
+                        )
+        except Exception as e:
+            logger.debug(f"[QQ增强2] 补昵称失败: {type(e).__name__}: {e}")
 
         # 按类型过滤
         if qq_event.etype == E_POKE and not self.collect_poke:
@@ -419,6 +616,16 @@ class QQEnhance2Plugin(BasePlugin):
                 else:
                     # 开关关闭：不唤醒，但也不能当成"他人贴"归档（自己的消息无需原文标注）
                     pass
+            elif info is None:
+                # 消息作者查不到（重启后 L1 空、get_msg 超时/被限流）：
+                # **无法确认这条消息是不是 bot 自己的** —— 不能当成"他人事件"，
+                # 否则"别人给 bot 的旧消息贴表情"会漏进群动态（作者显示成"用户(未知)"）。
+                # 归档/唤醒也依赖作者信息，一律跳过，只留调试日志。
+                if self.debug_log:
+                    logger.info(
+                        f"[QQ增强2] 跳过作者未知的贴表情事件: "
+                        f"sid={sid} message_id={msg_id} actor={qq_event.actor}"
+                    )
             else:
                 # 他人贴 → 归档到贴表情存储（用于原文标注）
                 if self.emoji_rewriter:
@@ -439,7 +646,7 @@ class QQEnhance2Plugin(BasePlugin):
                     # 不唤醒 → 入 store（群动态摘要可见）
                     # 默认关闭：贴表情已由"自己被贴唤醒 / 他人贴表情可唤醒"两路推送覆盖，
                     # 再默认进群动态摘要会重复且浪费 token
-                    await self.store.add(qq_event)
+                    await self._add_env_event(qq_event, cur_self_id)
             return
 
         # 撤回事件：归档
@@ -460,23 +667,23 @@ class QQEnhance2Plugin(BasePlugin):
                         sub_type=qq_event.extra.get("sub_type", ""),
                         is_group=qq_event.extra.get("is_group", False),
                     )
-            # 撤回归档后也入 store（环境摘要可见）
+            # 撤回归档后也入 store（环境摘要可见；涉及 bot 自己的不进）
             if self.debug_log:
                 logger.info(
                     f"[QQ增强2] 收集事件 {sid}: recall "
                     f"actor={qq_event.actor} target={qq_event.target}"
                 )
-            await self.store.add(qq_event)
+            await self._add_env_event(qq_event, cur_self_id)
             return
 
-        # 其他事件：入 store
+        # 其他事件：入 store（涉及 bot 自己的不进群动态）
         if self.debug_log:
             logger.info(
                 f"[QQ增强2] 收集事件 {sid}: {qq_event.etype} "
                 f"actor={qq_event.actor} target={qq_event.target} "
                 f"extra={qq_event.extra}"
             )
-        await self.store.add(qq_event)
+        await self._add_env_event(qq_event, cur_self_id)
 
     # ==================== 环境注入：llm_request 阶段 ====================
 
@@ -503,12 +710,19 @@ class QQEnhance2Plugin(BasePlugin):
             events = await self.store.get_events(
                 sid,
                 since_ts=time.time() - self.perceive_window_seconds,
-                etypes={E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN},
+                etypes=self._env_etypes(),
             )
+            # 历史残留兜底：旧版本落盘/内存里可能还有"涉及 bot 自己"的事件
+            # （例如别人戳 bot），渲染前按当前 self_id 再过滤一次。
+            adapter_name_env = sid.split(":", 1)[0] if ":" in sid else ""
+            cur_self_id_env = self._self_id_for_event(adapter_name_env, event)
+            if cur_self_id_env:
+                events = [e for e in events if not involves_self(e, cur_self_id_env)]
             env_text = render_env_summary(
                 events,
                 max_per_type=self.perceive_max_per_type,
                 max_chars=self.env_max_chars,
+                poke_action_text=self.poke_action_text,
             )
             if env_text:
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
@@ -558,7 +772,8 @@ class QQEnhance2Plugin(BasePlugin):
         if self.tools_profile:
             req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
                                            avatar_desc_prompt=self.avatar_desc_prompt,
-                                           avatar_desc_timeout=self.avatar_desc_timeout))
+                                           avatar_desc_timeout=self.avatar_desc_timeout,
+                                           avatar_describe=self.avatar_describe))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
 
         if self.tools_fetch_emoji_like:
