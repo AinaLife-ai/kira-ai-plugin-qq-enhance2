@@ -60,6 +60,8 @@ class QQEnhance2Plugin(BasePlugin):
         self.wake_others_emoji_cooldown = _safe_int(
             self.plugin_cfg.get("wake_others_emoji_cooldown"), 20)
         self.wake_profile_like = self.plugin_cfg.get("wake_profile_like", True)
+        self.profile_like_dm_only = self.plugin_cfg.get(
+            "profile_like_dm_only", False)
         self.wake_title = self.plugin_cfg.get("wake_title", True)
         self.wake_kicked = self.plugin_cfg.get("wake_kicked", True)
         self.wake_member_decrease = self.plugin_cfg.get("wake_member_decrease", True)
@@ -113,6 +115,10 @@ class QQEnhance2Plugin(BasePlugin):
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
         # 已"补报到期"的禁言事件（eid → 首次补报时间）：只补一次，之后不再渲染
         self._ban_expiry_announced: dict[str, float] = {}
+        # 用户最近活跃的会话：(adapter_name, uid) → (sid, ts)
+        # 用于 profile_like 这种"没有 group_id 的 notice"：协议端不告诉我们是哪个群/私聊点的赞，
+        # 只能往"最近和这个用户有交集的会话"发，避免落到 qq:dm:None 这种幽灵会话。
+        self._recent_sessions: dict[tuple[str, str], tuple[str, float]] = {}
 
     async def initialize(self):
         """初始化运行时组件。
@@ -410,6 +416,57 @@ class QQEnhance2Plugin(BasePlugin):
         """
         return self._resolve_adapter(adapter_name)[1]
 
+    def _remember_session(self, adapter_name: str, uid: str, sid: str) -> None:
+        """记录"某用户最近活跃的会话"（供没有 group_id 的事件兜底）。
+
+        Args:
+            adapter_name: 适配器名。
+            uid: 用户 QQ。
+            sid: 会话 ID（不能是 None 会话）。
+        """
+        uid = str(uid or "")
+        sid = str(sid or "")
+        if not uid or uid == "None" or not sid or sid.endswith(":None"):
+            return
+        self._recent_sessions[(adapter_name, uid)] = (sid, time.time())
+        if len(self._recent_sessions) > 2000:
+            cutoff = time.time() - 7 * 86400
+            self._recent_sessions = {
+                k: v for k, v in self._recent_sessions.items() if v[1] >= cutoff
+            }
+            if len(self._recent_sessions) > 2000:
+                items = sorted(self._recent_sessions.items(),
+                               key=lambda kv: kv[1][1], reverse=True)[:2000]
+                self._recent_sessions = dict(items)
+
+    def _resolve_like_sid(self, adapter_name: str, raw: dict, operator: str) -> str:
+        """给"资料卡被赞"选一个真实存在的会话。
+
+        profile_like 的 notice **没有 group_id**，框架会按 `user_id` 建会话，
+        而该字段是空的 → `qq:dm:None`。必须自己挑：
+
+        1. 协议端给了 group_id（部分实现会带）→ 用那个群；
+        2. 否则用"这个用户最近活跃的会话"（群或私聊都行）；
+        3. 都没有 → 用和他的私聊 `adapter:dm:uid`（至少是个合法会话）。
+
+        Args:
+            adapter_name: 适配器名。
+            raw: 原始 notice。
+            operator: 点赞的人 QQ。
+
+        Returns:
+            会话 ID。
+        """
+        gid = str((raw or {}).get("group_id") or "")
+        if gid and gid != "None":
+            return f"{adapter_name}:gm:{gid}"
+        # 默认落到"最近互动会话"（群/私聊按时间比）；开关打开才强制私聊
+        if not self.profile_like_dm_only:
+            hit = self._recent_sessions.get((adapter_name, str(operator or "")))
+            if hit and time.time() - hit[1] <= 7 * 86400:
+                return hit[0]
+        return f"{adapter_name}:dm:{operator}"
+
     def _message_in_buffer(self, sid: str, message_id: str) -> bool:
         """判断某条消息是否还在会话缓冲区里（= 会和本次唤醒同一批送给 LLM）。
 
@@ -525,6 +582,15 @@ class QQEnhance2Plugin(BasePlugin):
 
         # 只处理 notice 事件
         if not event.is_notice:
+            # 记录"谁最近在哪个会话活跃"（profile_like 兜底用）
+            try:
+                _sid0 = getattr(event.session, "sid", "") or ""
+                _an0 = _sid0.split(":", 1)[0] if ":" in _sid0 else ""
+                sender0 = getattr(event.message, "sender", None)
+                uid0 = str(getattr(sender0, "user_id", "") or "")
+                self._remember_session(_an0, uid0, _sid0)
+            except Exception:
+                pass
             # 顺便缓存群名（普通消息也带 group_name，成本 0）
             grp0 = getattr(event.message, "group", None)
             if self.wake_scheduler and grp0 is not None:
@@ -610,6 +676,10 @@ class QQEnhance2Plugin(BasePlugin):
         except Exception as e:
             logger.debug(f"[QQ增强2] 补昵称失败: {type(e).__name__}: {e}")
 
+        # 记录"这个用户最近在哪个会话活跃"（profile_like 兜底用）
+        if qq_event.actor:
+            self._remember_session(adapter_name, qq_event.actor, sid)
+
         # 按类型过滤
         if qq_event.etype == E_POKE and not self.collect_poke:
             return
@@ -628,7 +698,9 @@ class QQEnhance2Plugin(BasePlugin):
 
         # 唤醒级事件处理
         if qq_event.etype == E_PROFILE_LIKE_SELF:
-            # 资料卡点赞：合并防抖
+            # 资料卡点赞：协议端不给 group_id，框架会建出 qq:dm:None 的幽灵会话 →
+            # 这里换成"用户最近活跃的会话"（群或私聊），bot 的回复才有人看得到
+            qq_event.sid = self._resolve_like_sid(adapter_name, raw, qq_event.actor)
             await self.wake_scheduler.on_profile_like(qq_event)
             return
 

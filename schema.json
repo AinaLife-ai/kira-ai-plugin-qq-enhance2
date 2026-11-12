@@ -72,6 +72,12 @@
         "default": true,
         "hint": "资料卡被点赞时唤醒（同用户10秒内合并防抖）"
     },
+    "profile_like_dm_only": {
+        "name": "资料卡点赞只发私聊",
+        "type": "switch",
+        "default": false,
+        "hint": "关（默认）：落到 bot 与该用户最近互动的会话（群聊/私聊按时间比较，回复更容易被看到）。开：固定落到与该用户的私聊（注意：bot 不是对方好友时，私聊可能发送失败）"
+    },
     "wake_title": {
         "name": "头衔授予→唤醒",
         "type": "switch",

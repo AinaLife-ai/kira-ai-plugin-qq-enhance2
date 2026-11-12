@@ -378,6 +378,63 @@ async def main():
         await inst.terminate()
     _FAKE_BUFFER.buffer = []
 
+    print("\n=== 17. 资料卡点赞：默认落最近互动会话，开关可强制私聊 ===")
+    import warnings
+    from tests.real_adapter import make_profile_like, push_notice as _push
+
+    async def _like_sid(overrides):
+        a, q, _ = make_real_adapter(self_id=SELF)
+        inst, pub, _ = await build_plugin(
+            a, overrides={"profile_like_merge_window_seconds": 1, **overrides})
+        try:
+            inst._remember_session("napcat", "769690776", SID)  # 最近在群里活跃
+            for e in await _push(a, q, make_profile_like(769690776, SELF)):
+                await inst.on_im_message(e)
+            await asyncio.sleep(1.4)
+            return [e.session.sid for e in pub]
+        finally:
+            await inst.terminate()
+
+    sids_default = await _like_sid({"profile_like_dm_only": False})
+    print(f"       默认: {sids_default}")
+    check("默认落到最近互动会话（群）", any(x == SID for x in sids_default), sids_default)
+    check("默认不落 None", all("None" not in x for x in sids_default), sids_default)
+
+    sids_dm = await _like_sid({"profile_like_dm_only": True})
+    print(f"       强制私聊: {sids_dm}")
+    check("开关开启 → 私聊", any(x == "napcat:dm:769690776" for x in sids_dm), sids_dm)
+    check("强制私聊也不落 None", all("None" not in x for x in sids_dm), sids_dm)
+
+    # 没有任何历史互动 + 默认 → 回退私聊
+    a2, q2, _ = make_real_adapter(self_id=SELF)
+    inst2, pub2, _ = await build_plugin(
+        a2, overrides={"profile_like_merge_window_seconds": 1,
+                       "profile_like_dm_only": False})
+    try:
+        for e in await _push(a2, q2, make_profile_like(769690776, SELF)):
+            await inst2.on_im_message(e)
+        await asyncio.sleep(1.4)
+        sids2 = [e.session.sid for e in pub2]
+        print(f"       无历史: {sids2}")
+        check("无历史 → 回退私聊", any(x == "napcat:dm:769690776" for x in sids2), sids2)
+    finally:
+        await inst2.terminate()
+
+    print("\n=== 18. 唤醒事件元素类型：不再触发 message_types 弃用告警 ===")
+    adapter, _ = fresh_adapter()
+    inst, _pub, _ = await build_plugin(adapter)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            els = inst.wake_scheduler._get_supported_elements(adapter, inst.ctx)
+        dep = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        print(f"       元素: {els}")
+        check("无 DeprecationWarning", not dep, [str(x.message) for x in dep])
+        check("拿到完整元素列表（含 img/at）",
+              "img" in els and "at" in els, els)
+    finally:
+        await inst.terminate()
+
     print("\n" + "=" * 60)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:

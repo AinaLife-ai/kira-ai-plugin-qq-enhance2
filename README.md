@@ -66,6 +66,7 @@
 | `wake_others_emoji` | false | 他人消息被贴表情→可唤醒（默认关） |
 | `wake_others_emoji_cooldown` | 20 | 他人消息被贴表情唤醒冷却（秒） |
 | `wake_profile_like` | true | 资料卡被赞→唤醒 |
+| `profile_like_dm_only` | false | 资料卡点赞唤醒发到哪：**关（默认）=最近互动会话**（群/私聊按时间比）；开=只发与该用户的私聊（bot 非好友时可能发送失败） |
 | `wake_title` | true | 头衔授予→唤醒 |
 | `wake_kicked` | true | 被移出群→唤醒 |
 | `wake_member_decrease` | true | 其他人退群/被踢→唤醒（notice，与入群同款） |
@@ -170,6 +171,27 @@
   （每会话最多 20 条事件，30 秒落盘一次，24 小时 TTL）。
 
 ## 更新日志
+
+<details>
+<summary><b>v1.1.3</b>（2026-11-13）— 实机问题修复</summary>
+
+### 🐛 资料卡点赞落到 `qq:dm:None` 幽灵会话
+`profile_like` 的 notice **没有 group_id**，框架按 `user_id` 建会话，而该字段为空
+→ 唤醒发到 `qq:dm:None`，bot 的回复用户永远看不到。
+
+修复：按优先级挑一个真实会话
+1. 协议端给了 `group_id`（部分实现会带）→ 用那个群；
+2. 新增开关 `profile_like_dm_only`（**默认关**）：
+   - **关（默认）** → bot 与该用户**最近互动的会话**（群聊/私聊按时间比较，7 天内），
+     回复更容易被看到；没有历史互动则回退私聊。
+   - **开** → 固定发与该用户的私聊（⚠️ bot 不是对方好友时可能发送失败）。
+
+### 🐛 唤醒事件触发 `message_types` 弃用告警
+`hasattr(adapter, "message_types")` 会调用 deprecated 属性，实机日志刷 `DeprecationWarning`。
+改为直接走 `IMCapability._supported_elements`，不再产生告警，同时保留完整的
+`text/img/at/reply/record/emoji/sticker/poke/file/video/forward` 列表。
+
+</details>
 
 <details>
 <summary><b>v1.1.2</b>（2026-11-13）— 群动态：时间 + 分类型新鲜期 + 禁言状态机</summary>
