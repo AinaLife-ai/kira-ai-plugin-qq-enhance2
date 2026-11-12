@@ -210,9 +210,13 @@ class MessageLocator:
         Returns:
             "owner" | "admin" | "member" | ""（查询失败）。
         """
-        if not self.adapter or not sid.startswith("gm:"):
+        # 框架 sid 格式：adapter:gm:group_id（如 napcat:gm:123456）
+        if not self.adapter or not self.adapter.bot:
             return ""
-        group_id = sid.split(":")[-1]
+        parts = sid.split(":")
+        if len(parts) != 3 or parts[1] != "gm":
+            return ""
+        group_id = parts[2]
         try:
             resp = await asyncio.wait_for(
                 self.adapter.bot.send_action("get_group_member_info", {

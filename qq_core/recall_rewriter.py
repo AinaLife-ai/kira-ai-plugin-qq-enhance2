@@ -69,18 +69,28 @@ class RecallRewriter:
                 if not original_text:
                     continue
 
-                # 检查原文是否在 Prompt 中（模糊匹配：前 50 字）
-                if len(original_text) >= 50:
-                    match_key = original_text[:50]
-                else:
-                    match_key = original_text
-
+                # 检查原文是否在 Prompt 中（取前 50 字做匹配键；
+                # 同时要求匹配位置唯一，避免相似消息误伤）
+                match_key = original_text[:50] if len(original_text) >= 50 else original_text
                 if match_key not in p.content:
                     continue
+                if p.content.count(match_key) > 1:
+                    # 多个位置命中：无法唯一定位，跳过（保守）
+                    logger.debug(f"[QQ增强2] 撤回原文匹配到多处，跳过: {match_key[:20]}")
+                    continue
+
+                # 按 recall_show_content 决定是否带原文
+                annotation = recall_info.get("annotation", "")
+                if not recall_show_content:
+                    # 不显示原文：只保留"谁撤回了什么"，去掉原文引用
+                    import re as _re
+                    annotation = _re.sub(r'（"[^"]*"）', "", annotation)
+                    annotation = annotation.replace("撤回此消息", "撤回了一条消息")
 
                 # 检查是否已追加（幂等）
-                annotation = recall_info.get("annotation", "")
                 if annotation in p.content:
+                    continue
+                if recall_info.get("annotation", "") in p.content:
                     continue
 
                 # 追加撤回标注

@@ -46,10 +46,11 @@ class QQProfileTool(BaseTool):
         },
     }
 
-    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = ""):
+    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "", avatar_desc_prompt: str = ""):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
+        self.avatar_desc_prompt = avatar_desc_prompt or ""
 
     async def execute(
         self,
@@ -154,6 +155,11 @@ class QQProfileTool(BaseTool):
     async def _describe_avatar(self, head_url: str) -> str:
         """下载头像并用 VLM 生成描述（真正"看"头像）。
 
+        提示词对齐框架 message_formatter.py 的处理方式：
+        - 默认（avatar_desc_prompt 为空）→ prompt=None → desc_img 内部使用框架
+          默认提示词（跟随 WebUI 中 image_recognition.desc_prompt 的设置）
+        - 用户在本插件 schema 里填了 avatar_desc_prompt → 使用该自定义提示词
+
         Args:
             head_url: 头像 URL。
 
@@ -164,7 +170,6 @@ class QQProfileTool(BaseTool):
             from core.utils.common_utils import desc_img
 
             img = Image(head_url)
-            # 用框架默认 VLM 描述（与用户发图片同一条处理链）
             vlm = None
             try:
                 vlm = self.ctx.provider_mgr.get_default_vlm()
@@ -172,7 +177,16 @@ class QQProfileTool(BaseTool):
                 vlm = None
             if vlm is None:
                 return ""
-            desc = await desc_img(client=vlm, image=img, prompt="描述这个QQ用户头像的内容，包括人物形象、风格、颜色等，100字以内。", lang="zh")
+
+            # 提示词对齐框架：留空则跟随框架 WebUI 设置（prompt=None → 框架默认提示词）
+            custom_prompt = (self.avatar_desc_prompt or "").strip() or None
+            lang = "zh"
+            try:
+                lang = self.ctx.config.get_config("locale.lang", "zh") or "zh"
+            except Exception:
+                pass
+
+            desc = await desc_img(client=vlm, image=img, prompt=custom_prompt, lang=lang)
             return (desc or "").strip()
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")

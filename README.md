@@ -28,7 +28,9 @@
 
 ## 配置
 
-详见 `schema.json`。关键配置：
+详见 `schema.json`（28 个配置键）。完整列表：
+
+### 感知层（他人事件）
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
@@ -37,16 +39,54 @@
 | `collect_group_ban` | true | 感知他人被禁言 |
 | `collect_recall` | true | 感知撤回 |
 | `collect_member_decrease` | true | 感知退群/被踢 |
-| `wake_self_emoji` | true | 被贴表情→唤醒 |
+| `collect_title` | false | 感知头衔授予 |
+| `collect_card_admin` | false | 感知名片/管理员变更 |
+
+### 唤醒层（自己相关事件）
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `wake_self_emoji` | true | 自己消息被贴表情→唤醒 |
 | `wake_others_emoji` | false | 他人消息被贴表情→可唤醒（默认关） |
 | `wake_others_emoji_cooldown` | 20 | 他人消息被贴表情唤醒冷却（秒） |
 | `wake_profile_like` | true | 资料卡被赞→唤醒 |
 | `wake_title` | true | 头衔授予→唤醒 |
 | `wake_kicked` | true | 被移出群→唤醒 |
 | `profile_like_merge_window_seconds` | 10 | 点赞合并窗口（秒） |
+| `wake_quiet_hours` | "" | 静默时段（如 23:00-08:00），空=不静默 |
 | `wake_max_per_hour` | 60 | 每会话每小时最大唤醒次数；-1=无限制 |
+
+### 环境摘要
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
 | `perceive_window_seconds` | 1800 | 感知时间窗口（秒） |
-| `env_max_chars` | 800 | 环境摘要字符上限（超限踢旧淘汰） |
+| `perceive_max_events` | 20 | 每会话最多保留事件数（LRU） |
+| `perceive_max_per_type` | 6 | 每类型最多渲染条数 |
+| `env_max_chars` | 800 | 环境摘要字符上限（超限从最旧事件整条删除，不截断） |
+| `env_inject_min_interval` | 0 | 摘要注入最小间隔（秒），0=每轮注入增量 |
+| `env_ttl_hours` | 24 | 事件落盘保留时长（小时） |
+
+### 撤回 / 贴表情改写
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `recall_rewrite` | true | 撤回消息原文下补充标注 |
+| `recall_show_content` | true | 撤回时显示原文（关=只显示"某条消息被撤回"） |
+
+### 工具
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `tools_profile` | true | 启用 qq_profile / qq_group_profile |
+| `tools_fetch_emoji_like` | true | 启用 fetch_emoji_like |
+| `avatar_desc_prompt` | "" | 头像描述提示词，留空=跟随框架 WebUI 图片识别提示词设置 |
+
+### 调试
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `debug_log` | false | 输出详细调试日志 |
 
 ## 兼容性
 

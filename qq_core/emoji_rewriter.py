@@ -35,6 +35,26 @@ _EMOJI_STORE: dict[str, list[dict]] = {}
 _MAX_ARCHIVE = 50
 
 
+def _build_annotation(sub_entries: list[dict]) -> str:
+    """根据结构化条目构建标注文本。
+
+    Args:
+        sub_entries: [{operator, operator_name, emoji_ids, count}, ...]
+
+    Returns:
+        标注文本（多行）。
+    """
+    from .emoji_dict import get_emoji_name
+    parts = []
+    for sub in sub_entries:
+        emoji_str = "/".join(get_emoji_name(e) for e in sub.get("emoji_ids", [])) or "?"
+        cnt = sub.get("count", 1)
+        if cnt > 1:
+            emoji_str += f"×{cnt}"
+        parts.append(f"用户{sub.get('operator', '')}({sub.get('operator_name', '')}) 贴了{emoji_str}")
+    return "\n[贴表情｜" + "；".join(parts) + "]"
+
+
 def archive_emoji_like(
     *,
     sid: str,
@@ -72,19 +92,37 @@ def archive_emoji_like(
     # 同一 message_id 合并标注（多条贴表情合并为一条）
     for item in store:
         if item["message_id"] == message_id:
-            # 合并：追加到已有标注
-            if annotation not in item["annotation"]:
-                item["annotation"] += annotation.replace("\n[贴表情｜", "；").replace("]", "]")
+            # 合并：同一贴的人只累加次数，不同贴的人追加条目
+            merged = False
+            for sub in item["sub_entries"]:
+                if sub["operator"] == operator:
+                    sub["count"] += count
+                    merged = True
+                    break
+            if not merged:
+                item["sub_entries"].append({
+                    "operator": operator,
+                    "operator_name": operator_name,
+                    "emoji_ids": list(emoji_ids),
+                    "count": count,
+                })
+            item["annotation"] = _build_annotation(item["sub_entries"])
             item["ts"] = ts
             return
     store.append({
         "message_id": message_id,
         "text": message_text,
-        "emoji_ids": emoji_ids,
+        "emoji_ids": list(emoji_ids),
         "count": count,
         "operator": operator,
         "operator_name": operator_name,
         "ts": ts,
+        "sub_entries": [{
+            "operator": operator,
+            "operator_name": operator_name,
+            "emoji_ids": list(emoji_ids),
+            "count": count,
+        }],
         "annotation": annotation,
     })
     # LRU 淘汰

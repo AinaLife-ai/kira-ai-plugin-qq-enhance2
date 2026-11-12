@@ -66,6 +66,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.recall_show_content = self.plugin_cfg.get("recall_show_content", True)
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
+        self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
         self.debug_log = self.plugin_cfg.get("debug_log", False)
@@ -210,17 +211,21 @@ class QQEnhance2Plugin(BasePlugin):
             return
 
         if qq_event.etype == E_EMOJI_LIKE:
-            # 贴表情：判断是给自己还是他人
+            # 贴表情：判断是给自己还是他人（与 wake_self_emoji 开关解耦——判定必须准确）
             msg_id = qq_event.extra.get("message_id", "")
-            is_self_msg = bool(self.wake_self_emoji and await self.wake_scheduler._is_self_message(qq_event))
+            is_self_msg = await self.wake_scheduler._is_self_message(qq_event)
             info = await self.locator.lookup(msg_id, qq_event.sid) if msg_id else None
             msg_author = info.get("sender", "") if info else ""
             msg_author_name = info.get("sender_name", "") if info else ""
             msg_excerpt = info.get("text", "")[:20] if info else ""
 
             if is_self_msg:
-                # 给自己贴 → 立即唤醒
-                await self.wake_scheduler.trigger_emoji_like_self(qq_event, msg_author, msg_author_name, msg_excerpt)
+                # 给自己贴 → 立即唤醒（受 wake_self_emoji 开关控制）
+                if self.wake_self_emoji:
+                    await self.wake_scheduler.trigger_emoji_like_self(qq_event, msg_author, msg_author_name, msg_excerpt)
+                else:
+                    # 开关关闭：不唤醒，但也不能当成"他人贴"归档（自己的消息无需原文标注）
+                    pass
             else:
                 # 他人贴 → 归档到贴表情存储（用于原文标注）
                 archive_emoji_like(
@@ -270,34 +275,40 @@ class QQEnhance2Plugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def on_llm_request(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
-        """注入环境摘要 + 撤回改写。"""
+        """注入环境摘要 + 撤回/贴表情改写。
+
+        注意：环境摘要受 env_inject_min_interval 节流，但撤回/贴表情改写
+        必须每轮执行（否则标注会丢失），两者解耦。
+        """
         if not self.store or not self.recall_rewriter:
             return
 
         sid = event.sid
 
-        # 环境摘要注入
+        # 环境摘要注入（可节流）
+        should_inject = True
         if self.env_inject_min_interval > 0:
             last = self._last_env_inject.get(sid, 0)
             if time.time() - last < self.env_inject_min_interval:
-                return  # 节流跳过
+                should_inject = False
 
-        events = await self.store.get_events(
-            sid,
-            since_ts=time.time() - self.perceive_window_seconds,
-            etypes={E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN},
-        )
-        env_text = render_env_summary(
-            events,
-            max_per_type=self.perceive_max_per_type,
-            max_chars=self.env_max_chars,
-        )
-        if env_text:
-            # 插入到 user_prompt 最前（persist=False，不污染历史）
-            req.user_prompt.insert(0, Prompt(env_text, name="qq_social_env", persist=False))
-            self._last_env_inject[sid] = time.time()
+        if should_inject:
+            events = await self.store.get_events(
+                sid,
+                since_ts=time.time() - self.perceive_window_seconds,
+                etypes={E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN},
+            )
+            env_text = render_env_summary(
+                events,
+                max_per_type=self.perceive_max_per_type,
+                max_chars=self.env_max_chars,
+            )
+            if env_text:
+                # 插入到 user_prompt 最前（persist=False，不污染历史）
+                req.user_prompt.insert(0, Prompt(env_text, name="qq_social_env", persist=False))
+                self._last_env_inject[sid] = time.time()
 
-        # 撤回改写
+        # 撤回改写（每轮执行，不受节流影响）
         await self.recall_rewriter.rewrite(
             sid=sid,
             req=req,
@@ -305,7 +316,7 @@ class QQEnhance2Plugin(BasePlugin):
             recall_show_content=self.recall_show_content,
         )
 
-        # 贴表情标注改写（他人消息被贴表情 → 原文下补充）
+        # 贴表情标注改写（每轮执行，不受节流影响）
         await rewrite_emoji_like(
             sid=sid,
             req=req,
@@ -325,7 +336,7 @@ class QQEnhance2Plugin(BasePlugin):
             return
 
         if self.tools_profile:
-            req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=self.adapter, self_id=self.self_id))
+            req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=self.adapter, self_id=self.self_id, avatar_desc_prompt=self.avatar_desc_prompt))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=self.adapter, self_id=self.self_id))
 
         if self.tools_fetch_emoji_like:

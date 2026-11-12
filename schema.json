@@ -151,6 +151,12 @@
         "default": true,
         "hint": "启用 qq_profile / qq_group_profile 工具"
     },
+    "avatar_desc_prompt": {
+        "name": "头像描述提示词",
+        "type": "string",
+        "default": "",
+        "hint": "留空=跟随框架 WebUI 的图片识别提示词设置（推荐）；填写后使用该自定义提示词描述头像"
+    },
     "tools_fetch_emoji_like": {
         "name": "启用贴表情查询工具",
         "type": "switch",

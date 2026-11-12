@@ -103,9 +103,12 @@ class WakeScheduler:
         if self._in_quiet_hours(now):
             return False
 
-        # 每小时上限检查
-        if not self._check_hourly_limit(event.sid):
-            return False
+        # 每小时上限（只读判定，不计数；计数统一在 _trigger_text 收口）
+        if self.wake_max_per_hour != -1:
+            hour_bucket = int(now // 3600)
+            used = self._hourly_wake_count.get(event.sid, {}).get(hour_bucket, 0)
+            if used >= self.wake_max_per_hour:
+                return False
 
         # 按事件类型判定
         if event.etype == E_EMOJI_LIKE_SELF:
@@ -131,8 +134,8 @@ class WakeScheduler:
     def should_wake_now(self, event: QQEvent) -> bool:
         """同步版唤醒判定（不递增每小时计数，仅供事件处理时快速判断）。
 
-        与 should_wake 的区别：不检查每小时上限（上限在 _trigger_text 时统一计数），
-        只做静默时段 + 冷却判定。
+        与 should_wake 的区别：只做静默时段 + 冷却判定，不占用每小时配额
+        （配额在 _trigger_text 实际发送唤醒时统一计数）。
 
         Args:
             event: 归一化后的事件。
@@ -174,7 +177,7 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
-        await self._trigger_text(event.sid, text, "others_emoji_like")
+        await self._trigger_text(event.sid, text, "others_emoji_like", actor_qq=event.actor)
 
     async def _is_self_message(self, event: QQEvent) -> bool:
         """判断事件的目标消息是否是 bot 自己的。
@@ -187,6 +190,8 @@ class WakeScheduler:
         """
         msg_id = event.extra.get("message_id", "")
         if not msg_id:
+            return False
+        if not self.message_locator:
             return False
         info = await self.message_locator.lookup(msg_id, event.sid)
         if not info:
@@ -295,7 +300,7 @@ class WakeScheduler:
         """
         # 构造唤醒文本
         text = f"[System 用户{operator} 赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
-        await self._trigger_text(sid, text, "profile_like_summary")
+        await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator)
 
     async def trigger_emoji_like_self(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
         """触发"自己消息被贴表情"唤醒。
@@ -313,30 +318,39 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
-        await self._trigger_text(event.sid, text, "emoji_like_self")
+        await self._trigger_text(event.sid, text, "emoji_like_self", actor_qq=event.actor)
 
     async def trigger_title_self(self, event: QQEvent):
         """触发"头衔授予"唤醒。"""
         title = event.extra.get("title", "")
         text = f"[System 用户{event.actor}({event.actor_name}) 给你授予头衔\"{title}\"]"
-        await self._trigger_text(event.sid, text, "title_self")
+        await self._trigger_text(event.sid, text, "title_self", actor_qq=event.actor)
 
     async def trigger_kicked_self(self, event: QQEvent):
         """触发"被移出群"唤醒。"""
         text = f"[System 你被移出群聊]"
-        await self._trigger_text(event.sid, text, "kicked_self")
+        await self._trigger_text(event.sid, text, "kicked_self", actor_qq=event.actor)
 
-    async def _trigger_text(self, sid: str, text: str, event_type: str):
+    async def _trigger_text(self, sid: str, text: str, event_type: str, actor_qq: str = ""):
         """构造 KiraMessageEvent 并 trigger（进入会话 buffer）。
+
+        所有唤醒路径的统一收口：每小时配额在这里计数，保证任何唤醒
+        （被贴表情/点赞/头衔/被踢/他人贴表情）都受 wake_max_per_hour 约束。
 
         Args:
             sid: 会话 ID（格式: adapter:gm:group_id 或 adapter:dm:user_id）。
             text: 唤醒文本。
             event_type: 事件类型（用于日志）。
+            actor_qq: 触发者 QQ（用于 anti-harass 屏蔽名单检查）。
         """
-        # 检查 anti-harass 屏蔽名单
-        if await self._is_blocked(sid):
-            logger.debug(f"[QQ增强2] 唤醒被屏蔽: sid={sid}, type={event_type}")
+        # 每小时配额（唯一计数点）
+        if not self._check_hourly_limit(sid):
+            logger.debug(f"[QQ增强2] 唤醒被每小时上限拦截: sid={sid}, type={event_type}")
+            return
+
+        # 检查 anti-harass 屏蔽名单（按触发者用户检查）
+        if await self._is_blocked(sid, actor_qq):
+            logger.debug(f"[QQ增强2] 唤醒被屏蔽: sid={sid}, type={event_type}, actor={actor_qq}")
             return
 
         # 解析 sid
@@ -387,14 +401,22 @@ class WakeScheduler:
         await self.ctx.event_bus.publish(event)
         logger.info(f"[QQ增强2] 唤醒已触发: sid={sid}, type={event_type}")
 
-    async def _is_blocked(self, sid: str) -> bool:
-        """检查是否被 anti-harass 屏蔽。
+    async def _is_blocked(self, sid: str, actor_qq: str = "") -> bool:
+        """检查触发者是否被 anti-harass 屏蔽。
+
+        anti-harass 的屏蔽是**针对用户**的（屏蔽某人发言），因此要检查
+        触发本次唤醒的具体用户（贴表情的人/点赞的人）是否在屏蔽名单里。
+
+        anti-harass 持久化格式（ignore_list.json）：
+            {"{sid}|{uid}|{kind}": expire_ts, ...}
+        其中 kind ∈ {"poke", "all"}（"all" 表示拉黑该用户全部消息）。
 
         Args:
-            sid: 会话 ID。
+            sid: 会话 ID（adapter:gm:group_id）。
+            actor_qq: 触发者 QQ 号。
 
         Returns:
-            True = 被屏蔽；False = 未被屏蔽。
+            True = 被屏蔽（不应唤醒）；False = 未被屏蔽。
         """
         # 定期加载屏蔽名单（60s 缓存）
         now = time.time()
@@ -402,35 +424,55 @@ class WakeScheduler:
             await self._load_blocklist()
             self._last_blocklist_load = now
 
-        # 检查 sid 是否在屏蔽名单
-        # anti-harass 的屏蔽名单格式：{qq: expire_ts} 或 {sid: expire_ts}
-        # 简化：检查 sid 或 session_id 是否在屏蔽名单
-        parts = sid.split(":")
-        if len(parts) != 3:
+        if not actor_qq:
             return False
-        session_id = parts[2]
-        return session_id in self._harass_blocklist and self._harass_blocklist[session_id] > now
+
+        # 匹配 {sid}|{actor_qq}|* 的任意 kind（poke / all）
+        for key, expire in self._harass_blocklist.items():
+            if expire <= now:
+                continue
+            parts = key.split("|")
+            if len(parts) != 3:
+                continue
+            k_sid, k_uid, _kind = parts
+            if k_uid == actor_qq and (k_sid == sid or k_sid == "*"):
+                return True
+        return False
 
     async def _load_blocklist(self):
-        """加载 anti-harass 屏蔽名单。"""
-        # anti-harass 的数据目录：ctx.get_plugin_data_dir() + "/KiraAI-anti-harass-plugin/ignore_list.json"
-        # 简化：只检查 data/ignore_list.json（不依赖具体插件 ID）
+        """加载 anti-harass 屏蔽名单。
+
+        文件格式（anti-harass 的 data/ignore_list.json）：
+            {"{sid}|{uid}|{kind}": expire_ts, ...}
+        键的三段：会话 sid、用户 QQ、屏蔽类型（poke/all）。
+        """
         try:
             data_dir = self.ctx.get_plugin_data_dir()
             if not data_dir:
                 return
-            path = os.path.join(data_dir, "ignore_list.json")
-            if not os.path.exists(path):
+            # anti-harass 的插件数据目录与我们的不同，按插件 id 定位
+            import os as _os
+            base = _os.path.dirname(str(data_dir))  # plugin_data/
+            candidates = [
+                _os.path.join(base, "KiraAI-anti-harass-plugin", "ignore_list.json"),
+                _os.path.join(base, "anti-harass", "ignore_list.json"),
+                _os.path.join(base, "anti_harass", "ignore_list.json"),
+            ]
+            path = next((p for p in candidates if _os.path.exists(p)), None)
+            if not path:
                 return
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # 格式：{qq: expire_ts} 或 {qq: {expire_ts: ...}}
-            for qq, val in data.items():
-                if isinstance(val, (int, float)):
-                    self._harass_blocklist[qq] = float(val)
-                elif isinstance(val, dict):
-                    expire = val.get("expire_ts") or val.get("expire") or 0
-                    if expire:
-                        self._harass_blocklist[qq] = float(expire)
+            if not isinstance(data, dict):
+                return
+            self._harass_blocklist = {}
+            for key, val in data.items():
+                if not isinstance(key, str) or "|" not in key:
+                    continue
+                try:
+                    expire = float(val)
+                except (TypeError, ValueError):
+                    continue
+                self._harass_blocklist[key] = expire
         except Exception:
             pass
