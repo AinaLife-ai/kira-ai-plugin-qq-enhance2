@@ -28,7 +28,7 @@ from .qq_core.env_renderer import render_env_summary
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
-from .qq_core.emoji_rewriter import archive_emoji_like, rewrite_emoji_like
+from .qq_core.emoji_rewriter import EmojiRewriter
 from .tools.qq_profile import QQProfileTool
 from .tools.qq_group_profile import QQGroupProfileTool
 from .tools.fetch_emoji_like import FetchEmojiLikeTool
@@ -90,6 +90,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.store: Optional[EventStore] = None
         self.wake_scheduler: Optional[WakeScheduler] = None
         self.locator: Optional[MessageLocator] = None
+        self.emoji_rewriter: Optional[EmojiRewriter] = None
         self.recall_rewriter: Optional[RecallRewriter] = None
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
 
@@ -171,6 +172,7 @@ class QQEnhance2Plugin(BasePlugin):
         )
 
         self.recall_rewriter = RecallRewriter(locator=self.locator)
+        self.emoji_rewriter = EmojiRewriter()
 
         logger.info("[QQ增强2] 初始化完成。")
 
@@ -210,11 +212,8 @@ class QQEnhance2Plugin(BasePlugin):
         if self.store:
             await self.store.stop()
         # 清空贴表情/撤回归档（模块级全局状态）
-        try:
-            from .qq_core.emoji_rewriter import _EMOJI_STORE
-            _EMOJI_STORE.clear()
-        except Exception:
-            pass
+        if self.emoji_rewriter:
+            self.emoji_rewriter.clear()
         logger.info("[QQ增强2] 已停止。")
 
     # ==================== 感知层：im_message 收集他人事件 ====================
@@ -271,6 +270,24 @@ class QQEnhance2Plugin(BasePlugin):
         if not qq_event:
             return
 
+        # 补昵称：normalizer 只解析字段，昵称由框架在构造 notice 事件时查到
+        # （KiraIMMessage.sender.nickname）。不补的话渲染会出现"用户1005()"空括号。
+        try:
+            sender = getattr(event.message, "sender", None)
+            if sender and str(getattr(sender, "user_id", "")) == qq_event.actor:
+                nm = str(getattr(sender, "nickname", "") or "").strip()
+                if nm and nm != "None":
+                    qq_event.actor_name = nm
+            if not qq_event.actor_name:
+                # 兜底：从 raw_message 里找（部分协议端带 nickname 字段）
+                for k in ("nickname", "card", "operator_nick", "sender_nick"):
+                    v = raw.get(k)
+                    if v:
+                        qq_event.actor_name = str(v)
+                        break
+        except Exception:
+            pass
+
         # 按类型过滤
         if qq_event.etype == E_POKE and not self.collect_poke:
             return
@@ -322,16 +339,17 @@ class QQEnhance2Plugin(BasePlugin):
                     pass
             else:
                 # 他人贴 → 归档到贴表情存储（用于原文标注）
-                archive_emoji_like(
-                    sid=qq_event.sid,
-                    message_id=msg_id,
-                    message_text=info.get("text", "") if info else "",
-                    emoji_ids=qq_event.extra.get("emoji_ids", []),
-                    count=qq_event.extra.get("count", 1),
-                    operator=qq_event.actor,
-                    operator_name=qq_event.actor_name,
-                    ts=qq_event.ts,
-                )
+                if self.emoji_rewriter:
+                    self.emoji_rewriter.archive(
+                        sid=qq_event.sid,
+                        message_id=msg_id,
+                        message_text=info.get("text", "") if info else "",
+                        emoji_ids=qq_event.extra.get("emoji_ids", []),
+                        count=qq_event.extra.get("count", 1),
+                        operator=qq_event.actor,
+                        operator_name=qq_event.actor_name,
+                        ts=qq_event.ts,
+                    )
                 # 检查是否需要唤醒（默认冷却 20 秒）
                 if self.wake_scheduler.should_wake_now(qq_event):
                     await self.wake_scheduler.trigger_others_emoji_like(qq_event, msg_author, msg_author_name, msg_excerpt)
@@ -413,11 +431,12 @@ class QQEnhance2Plugin(BasePlugin):
         )
 
         # 贴表情标注改写（每轮执行，不受节流影响）
-        await rewrite_emoji_like(
-            sid=sid,
-            req=req,
-            enabled=self.collect_emoji_like,
-        )
+        if self.emoji_rewriter:
+            await self.emoji_rewriter.rewrite(
+                sid=sid,
+                req=req,
+                enabled=self.collect_emoji_like,
+            )
 
     # ==================== 工具注入：llm_request 阶段 ====================
 

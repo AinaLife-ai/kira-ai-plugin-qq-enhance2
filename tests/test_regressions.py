@@ -104,7 +104,7 @@ def test_bug1_throttle_not_skip_rewrite():
     # 撤回/贴表情改写在节流判断之后独立执行
     idx_throttle = tree.find("should_inject = False")
     idx_recall = tree.find("await self.recall_rewriter.rewrite")
-    idx_emoji = tree.find("await rewrite_emoji_like(")
+    idx_emoji = tree.find("await self.emoji_rewriter.rewrite")
     # 两者都在节流判断之后（顺序无关）
     assert idx_throttle < idx_recall, "撤回改写应在节流判断之后"
     assert idx_throttle < idx_emoji, "贴表情改写应在节流判断之后"
