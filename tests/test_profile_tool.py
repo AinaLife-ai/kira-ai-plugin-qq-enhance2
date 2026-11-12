@@ -430,3 +430,45 @@ def test_avatar_missing_local_path_errors_early():
     out = asyncio.run(tool.execute(_Ev("3003003"), avatar="/nope/not-here.png"))
     assert "本地文件不存在" in out, out
     assert _args(bot.calls, "set_qq_avatar") == []
+
+
+# ==================== 头像识别开关（avatar_describe / look_avatar）====================
+
+def _counting_tool(avatar_describe=True):
+    bot = _Bot({"get_stranger_info": {"status": "ok", "data": {
+        "user_id": 1001, "nickname": "张三", "sex": 1,
+    }}})
+    tool = QQProfileTool(ctx=None, adapter=_Adapter(bot), self_id="3003003",
+                         avatar_describe=avatar_describe)
+    calls = {"n": 0}
+
+    async def fake(url):
+        calls["n"] += 1
+        return "一个卡通头像"
+
+    tool._describe_avatar = fake
+    return tool, bot, calls
+
+
+def test_avatar_describe_config_off_skips_vlm():
+    """配置关闭 → 连 VLM 都不调，只回头像链接。"""
+    tool, _bot, calls = _counting_tool(avatar_describe=False)
+    out = asyncio.run(tool.execute(_Ev("3003003"), user_id="1001"))
+    assert calls["n"] == 0, calls
+    assert "q1.qlogo.cn" in out, out
+
+
+def test_look_avatar_false_skips_vlm():
+    """配置开着，但本次 look_avatar=false → 跳过识别（bot 自己决定）。"""
+    tool, _bot, calls = _counting_tool(avatar_describe=True)
+    out = asyncio.run(tool.execute(_Ev("3003003"), user_id="1001", look_avatar=False))
+    assert calls["n"] == 0, calls
+    assert "q1.qlogo.cn" in out, out
+
+
+def test_avatar_describe_default_calls_vlm():
+    """默认开启 + 未传 look_avatar → 识别一次。"""
+    tool, _bot, calls = _counting_tool(avatar_describe=True)
+    out = asyncio.run(tool.execute(_Ev("3003003"), user_id="1001"))
+    assert calls["n"] == 1, calls
+    assert "一个卡通头像" in out, out

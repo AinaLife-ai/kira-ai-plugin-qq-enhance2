@@ -163,6 +163,12 @@
         "default": true,
         "hint": "启用 qq_profile / qq_group_profile 工具"
     },
+    "avatar_describe": {
+        "name": "查询资料时识别头像",
+        "type": "switch",
+        "default": true,
+        "hint": "开启后查询资料会用视觉模型「看」头像并给出描述（每次调用消耗 VLM token/几秒延迟）；关闭则只返回头像链接。即使开启，bot 也可以按次传 look_avatar=false 跳过识别"
+    },
     "avatar_desc_prompt": {
         "name": "头像描述提示词",
         "type": "string",

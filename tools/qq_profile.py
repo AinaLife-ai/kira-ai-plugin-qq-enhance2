@@ -55,6 +55,10 @@ class QQProfileTool(BaseTool):
                 "type": "integer",
                 "description": "0未知/1男/2女（仅自己，部分协议端不支持）",
             },
+            "look_avatar": {
+                "type": "boolean",
+                "description": "是否用视觉模型识别头像内容（默认 true）；false=只返回头像链接，省时间/token",
+            },
             "avatar": {
                 "type": "string",
                 "description": "新头像（仅自己）：本地路径/URL/base64，或 recent=对话里最新图片。不传=不改",
@@ -63,12 +67,15 @@ class QQProfileTool(BaseTool):
     }
 
     def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
-                 avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0):
+                 avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0,
+                 avatar_describe: bool = True):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
         self.avatar_desc_prompt = avatar_desc_prompt or ""
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
+        # 总开关（配置项 avatar_describe）：关掉后连 VLM 都不调，只给头像链接
+        self.avatar_describe = bool(avatar_describe)
 
     # ==================== 基础取值工具 ====================
 
@@ -175,6 +182,7 @@ class QQProfileTool(BaseTool):
         personal_note: str = None,
         sex: int = None,
         avatar: str = "",
+        look_avatar: bool = True,
         **kwargs,
     ) -> str:
         """执行工具。
@@ -210,7 +218,9 @@ class QQProfileTool(BaseTool):
 
         if not is_self:
             # 查询模式：只查询，忽略修改字段
-            return await self._query_user(target, is_self=False, group_id=group_id)
+            return await self._query_user(
+                target, is_self=False, group_id=group_id,
+                describe=bool(look_avatar) and self.avatar_describe)
 
         # 读写模式：操作自己
         # 构建修改字段
@@ -249,7 +259,9 @@ class QQProfileTool(BaseTool):
             return f"修改头像失败：{avatar_err}"
         if not update_fields and not avatar_file:
             # 未传修改字段：返回当前资料
-            return await self._query_user(target, is_self=is_self, group_id=group_id)
+            return await self._query_user(
+                target, is_self=is_self, group_id=group_id,
+                describe=bool(look_avatar) and self.avatar_describe)
 
         # 执行修改
         # 注意：不同协议端支持的字段不同（如 LLOneBot 的 set_qq_profile 只支持
@@ -327,17 +339,21 @@ class QQProfileTool(BaseTool):
                     results.append(f"头像修改失败：{reason}")
 
             if not results:
-                return await self._query_user(target, is_self=is_self, group_id=group_id)
+                return await self._query_user(
+                    target, is_self=is_self, group_id=group_id,
+                    describe=bool(look_avatar) and self.avatar_describe)
             # 返回修改结果 + 最新资料
             summary = "；".join(results)
-            profile = await self._query_user(target, is_self=is_self, group_id=group_id)
+            profile = await self._query_user(
+                target, is_self=is_self, group_id=group_id,
+                describe=bool(look_avatar) and self.avatar_describe)
             return f"修改完成（{summary}）。\n{profile}"
         except Exception as e:
             logger.debug(f"[QQ增强2] set_qq_profile 失败: {e}")
             return f"修改失败：{e}"
 
     async def _query_user(self, qq: str, *, is_self: bool = False,
-                          group_id: str = "") -> str:
+                          group_id: str = "", describe: bool = True) -> str:
         """查询用户资料（含头像读图）。
 
         字段来源（**实测 NapCat 与文档差异**）：
@@ -354,6 +370,7 @@ class QQProfileTool(BaseTool):
             qq: QQ 号。
             is_self: 是否查询自己（决定是否走 get_login_info 兜底）。
             group_id: 当前群号（群聊里查询时补一行「群名片」，**不替代昵称**）。
+            describe: 是否用 VLM 识别头像（False → 只输出 URL）。
 
         Returns:
             资料文本。
@@ -459,7 +476,7 @@ class QQProfileTool(BaseTool):
 
         # 头像：读图（VLM 描述），而非只给 URL
         if head_url:
-            avatar_desc = await self._describe_avatar(head_url)
+            avatar_desc = await self._describe_avatar(head_url) if describe else ""
             if avatar_desc:
                 result += f"  头像：{avatar_desc}\n"
             else:

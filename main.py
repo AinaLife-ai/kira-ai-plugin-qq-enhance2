@@ -78,6 +78,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.recall_show_content = self.plugin_cfg.get("recall_show_content", True)
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
+        self.avatar_describe = self.plugin_cfg.get("avatar_describe", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
@@ -771,7 +772,8 @@ class QQEnhance2Plugin(BasePlugin):
         if self.tools_profile:
             req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
                                            avatar_desc_prompt=self.avatar_desc_prompt,
-                                           avatar_desc_timeout=self.avatar_desc_timeout))
+                                           avatar_desc_timeout=self.avatar_desc_timeout,
+                                           avatar_describe=self.avatar_describe))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
 
         if self.tools_fetch_emoji_like:
