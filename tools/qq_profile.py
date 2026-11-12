@@ -22,11 +22,12 @@ from core.plugin import PluginContext
 
 logger = get_logger("qq_enhance2.qq_profile", "cyan")
 
-# 头像描述缓存：同一 URL 10 分钟内不重复调 VLM。
-# 每次 VLM 调用都是钱 + 几秒延迟，而同一个人的头像短时间内不会变。
+# 头像描述缓存：同一 URL 1 分钟内不重复调 VLM。
+# 每次 VLM 调用都是钱 + 几秒延迟；1 分钟足够挡住"连续查同一个人"的重复调用，
+# 又不会让刚换的头像在描述里停留太久。
 # 只缓存成功结果（失败可能是网络抖动，不该被记住）。
 _AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
-_AVATAR_DESC_TTL = 600.0
+_AVATAR_DESC_TTL = 60.0
 _AVATAR_DESC_MAX = 128
 
 
@@ -228,9 +229,12 @@ class QQProfileTool(BaseTool):
                 logger.debug(f"[QQ增强2] 忽略非法 sex 值: {sex!r}")
 
         # 头像走独立 action（set_qq_avatar），参数是 file
-        # 「换头像」最常见的用法是"用我刚发的图"——但图片在 prompt 里只有
-        # [Image: 描述]，LLM 拿不到路径/URL。所以支持 avatar="recent"：
-        # 从当前批次的消息链里取最新的一张图。
+        # 「换头像」最常见的用法是"用我刚发的图"。
+        # 注意：框架的 message_formatter 会把图片渲染成
+        #   [Image <描述>, file_path: data/xxx.jpg]
+        # 所以 LLM **本来就能**拿到路径（S/Z/默认聊天插件都会走到这个格式化器）；
+        # 但不同插件/模型抄路径容易出错，额外提供 avatar="recent" 直接从
+        # 当前批次的消息链里取最新一张图，省掉"抄路径"这一步。
         avatar_raw = str(avatar or "").strip()
         if avatar_raw.lower() in ("recent", "last", "latest", "current",
                                   "最近", "刚才", "最新"):
@@ -494,9 +498,8 @@ class QQProfileTool(BaseTool):
     def _latest_image_file(event) -> str:
         """取当前消息批次里最新一张图片的 file（路径 / URL / base64）。
 
-        为什么需要：图片在 prompt 里只剩 `[Image: 描述]`，LLM 拿不到路径，
-        所以「用我刚发的图当头像」这种最常见的用法必须由插件自己从
-        event.messages 的消息链里取。
+        框架的 formatter 会给出 `[Image <描述>, file_path: data/xxx.jpg]`，
+        LLM 通常能拿到路径；`recent` 只是让"用我刚发的图"更省事、更不容易抄错。
 
         Args:
             event: KiraMessageBatchEvent。

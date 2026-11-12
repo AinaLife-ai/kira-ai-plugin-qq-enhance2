@@ -208,9 +208,34 @@ def file_to_protocol_uri(value, *, max_inline_bytes: int = _INLINE_MAX_BYTES) ->
     return _local_to_uri(s, max_inline_bytes)
 
 
+def _path_candidates(path: str):
+    """生成可能的本地路径（相对路径 + 框架 data/ 前缀兜底）。
+
+    框架 message_formatter 给 LLM 的路径形如 `data/xxx.jpg`（相对 data 根的父目录），
+    但进程 cwd 未必就是那个父目录（可能用绝对路径启动）→ 两个都试。
+    """
+    if os.path.isabs(path):
+        yield path
+        return
+    yield os.path.abspath(path)
+    if path.startswith("data/"):
+        try:
+            from core.utils.path_utils import get_data_path
+            base = os.path.dirname(str(get_data_path()))
+            yield os.path.normpath(os.path.join(base, path))
+        except Exception:
+            pass
+
+
 def _local_to_uri(path: str, max_inline_bytes: int) -> tuple[str, str]:
     """本地路径 → (协议端可用 uri, 错误说明)。"""
-    p = os.path.abspath(path) if not os.path.isabs(path) else path
+    p = path
+    for cand in _path_candidates(path):
+        if os.path.isfile(cand):
+            p = cand
+            break
+    else:
+        p = os.path.abspath(path) if not os.path.isabs(path) else path
     if not os.path.isfile(p):
         return p, f"本地文件不存在：{p}（若协议端不在同一台机器，请改用 http(s) URL 或 base64）"
     try:
