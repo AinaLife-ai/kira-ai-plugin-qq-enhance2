@@ -188,6 +188,13 @@
         "min": 1,
         "hint": "VLM 描述头像的超时时间；超时则降级为只显示头像 URL（避免卡住工具调用）"
     },
+    "avatar_desc_cache_seconds": {
+        "name": "头像描述缓存(秒)",
+        "type": "int",
+        "default": 60,
+        "min": 0,
+        "hint": "同一头像在这段时间内复用识别结果，避免反复调用视觉模型；0=不缓存（每次都重新识别）"
+    },
     "resolve_nickname": {
         "name": "补全事件昵称",
         "type": "switch",

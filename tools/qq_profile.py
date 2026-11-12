@@ -22,8 +22,9 @@ from core.plugin import PluginContext
 
 logger = get_logger("qq_enhance2.qq_profile", "cyan")
 
-# 头像描述缓存：同一 URL 1 分钟内不重复调 VLM。
-# 每次 VLM 调用都是钱 + 几秒延迟；1 分钟足够挡住"连续查同一个人"的重复调用，
+# 头像描述缓存：同一 URL 在 TTL 内不重复调 VLM（TTL 由配置项
+# avatar_desc_cache_seconds 控制，默认 60 秒，0=不缓存）。
+# 每次 VLM 调用都是钱 + 几秒延迟；默认 60 秒足够挡住"连续查同一个人"的重复调用，
 # 又不会让刚换的头像在描述里停留太久。
 # 只缓存成功结果（失败可能是网络抖动，不该被记住）。
 _AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
@@ -68,7 +69,7 @@ class QQProfileTool(BaseTool):
 
     def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
                  avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0,
-                 avatar_describe: bool = True):
+                 avatar_describe: bool = True, avatar_desc_cache_seconds: float = 60.0):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
@@ -76,6 +77,11 @@ class QQProfileTool(BaseTool):
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
         # 总开关（配置项 avatar_describe）：关掉后连 VLM 都不调，只给头像链接
         self.avatar_describe = bool(avatar_describe)
+        # 描述缓存时长（配置项 avatar_desc_cache_seconds）：<=0 表示不缓存，每次都重新识别
+        try:
+            self.avatar_desc_cache_seconds = float(avatar_desc_cache_seconds)
+        except (TypeError, ValueError):
+            self.avatar_desc_cache_seconds = _AVATAR_DESC_TTL
 
     # ==================== 基础取值工具 ====================
 
@@ -568,11 +574,13 @@ class QQProfileTool(BaseTool):
         Returns:
             头像描述文本；失败时返回空串。
         """
-        # 缓存命中直接返回（省一次 VLM 调用）
-        cached = _AVATAR_DESC_CACHE.get(head_url)
-        if cached and time.time() - cached[1] < _AVATAR_DESC_TTL:
-            _AVATAR_DESC_CACHE.move_to_end(head_url)
-            return cached[0]
+        # 缓存命中直接返回（省一次 VLM 调用）；ttl<=0 = 关闭缓存
+        ttl = self.avatar_desc_cache_seconds
+        if ttl > 0:
+            cached = _AVATAR_DESC_CACHE.get(head_url)
+            if cached and time.time() - cached[1] < ttl:
+                _AVATAR_DESC_CACHE.move_to_end(head_url)
+                return cached[0]
 
         try:
             from core.utils.common_utils import desc_img
@@ -604,7 +612,7 @@ class QQProfileTool(BaseTool):
             desc = (desc or "").strip()
             if len(desc) > 300:
                 desc = desc[:300] + "…"
-            if desc:
+            if desc and ttl > 0:
                 _AVATAR_DESC_CACHE[head_url] = (desc, time.time())
                 _AVATAR_DESC_CACHE.move_to_end(head_url)
                 while len(_AVATAR_DESC_CACHE) > _AVATAR_DESC_MAX:

@@ -80,6 +80,8 @@ class QQEnhance2Plugin(BasePlugin):
         self.avatar_describe = self.plugin_cfg.get("avatar_describe", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
+        self.avatar_desc_cache_seconds = _safe_int(
+            self.plugin_cfg.get("avatar_desc_cache_seconds"), 60)
 
         self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
         self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
@@ -811,5 +813,6 @@ class QQEnhance2Plugin(BasePlugin):
             req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
                                            avatar_desc_prompt=self.avatar_desc_prompt,
                                            avatar_desc_timeout=self.avatar_desc_timeout,
-                                           avatar_describe=self.avatar_describe))
+                                           avatar_describe=self.avatar_describe,
+                                           avatar_desc_cache_seconds=self.avatar_desc_cache_seconds))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
