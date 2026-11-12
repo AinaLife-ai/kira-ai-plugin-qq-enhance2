@@ -86,6 +86,8 @@ def _make_scheduler(**kw):
     ctx = MockCtx()
     defaults = dict(
         ctx=ctx, adapter=real_adapter, self_id="3003", message_locator=None,
+        # 这些是"即时唤醒"的单元测试，关掉合并窗口
+        wake_emoji_merge_seconds=0,
     )
     defaults.update(kw)
     return WakeScheduler(**defaults), ctx

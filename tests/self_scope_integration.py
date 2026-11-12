@@ -339,7 +339,9 @@ async def main():
 
     _FAKE_BUFFER.buffer = [_Ev("900777")]
     adapter, _ = fresh_adapter()
-    inst, pub, _ = await build_plugin(adapter, overrides={"wake_others_emoji": True})
+    inst, pub, _ = await build_plugin(
+        adapter, overrides={"wake_others_emoji": True,
+                            "wake_emoji_merge_seconds": 0})
     try:
         await feed(adapter, inst, make_emoji_like(1001, 900777, GID, SELF))
         text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
@@ -353,7 +355,9 @@ async def main():
     print("\n=== 15. 他人贴表情：消息不在缓冲区 → 保留事实 + 提示 ===")
     _FAKE_BUFFER.buffer = []
     adapter, _ = fresh_adapter()
-    inst, pub, _ = await build_plugin(adapter, overrides={"wake_others_emoji": True})
+    inst, pub, _ = await build_plugin(
+        adapter, overrides={"wake_others_emoji": True,
+                            "wake_emoji_merge_seconds": 0})
     try:
         await feed(adapter, inst, make_emoji_like(1001, 900778, GID, SELF))
         text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
@@ -367,7 +371,8 @@ async def main():
     _FAKE_BUFFER.buffer = [_Ev("900779")]
     adapter, _ = fresh_adapter()
     inst, pub, _ = await build_plugin(
-        adapter, overrides={"wake_others_emoji": True, "wake_hint": ""})
+        adapter, overrides={"wake_others_emoji": True, "wake_hint": "",
+                            "wake_emoji_merge_seconds": 0})
     try:
         await feed(adapter, inst, make_emoji_like(1001, 900779, GID, SELF))
         text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
@@ -434,6 +439,104 @@ async def main():
               "img" in els and "at" in els, els)
     finally:
         await inst.terminate()
+
+    print("\n=== 19. 自己被贴表情：独立冷却 wake_self_emoji_cooldown（默认 10）===")
+    from tests.real_adapter import make_emoji_like
+
+    async def _self_emoji_wakes(cooldown):
+        a, _calls = fresh_adapter()
+        inst, pub, _ = await build_plugin(
+            a, overrides={"wake_self_emoji": True,
+                          "wake_self_emoji_cooldown": cooldown,
+                          "wake_emoji_merge_seconds": 0})
+        try:
+            await inst.locator.record_incoming(
+                "900901", SELF, "紫小贱", "我的消息", is_self=True)
+            for _ in range(2):
+                for e in await push_notice(a, _QUEUE[0],
+                                           make_emoji_like(1001, 900901, GID, SELF)):
+                    await inst.on_im_message(e)
+            return len(pub)
+        finally:
+            await inst.terminate()
+
+    n0 = await _self_emoji_wakes(0)
+    n60 = await _self_emoji_wakes(60)
+    n10 = await _self_emoji_wakes(10)
+    print(f"       cooldown=0 → {n0} 次；=60 → {n60} 次；=10 → {n10} 次")
+    check("0 = 每条都唤醒", n0 == 2, n0)
+    check("60 秒内第二次被冷却", n60 == 1, n60)
+    check("默认 10 秒也冷却", n10 == 1, n10)
+
+    print("\n=== 20. 自己被贴表情：同一条消息短时间合并 ===")
+
+    async def _merge_texts(merge_seconds, same_message):
+        a, _calls = fresh_adapter()
+        inst, pub, _ = await build_plugin(
+            a, overrides={"wake_self_emoji": True,
+                          "wake_self_emoji_cooldown": 0,
+                          "wake_emoji_merge_seconds": merge_seconds})
+        try:
+            await inst.locator.record_incoming("900902", SELF, "紫小贱", "我的消息", is_self=True)
+            await inst.locator.record_incoming("900903", SELF, "紫小贱", "另一条消息", is_self=True)
+            targets = ("900902", "900902") if same_message else ("900902", "900903")
+            for i, mid in enumerate(targets):
+                eid = "4" if i == 0 else "66"
+                for e in await push_notice(a, _QUEUE[0],
+                                           make_emoji_like(1001, int(mid), GID, SELF, emoji_id=eid)):
+                    await inst.on_im_message(e)
+            await asyncio.sleep(max(merge_seconds, 0) + 0.6)
+            return ["".join(getattr(x, "text", "") for x in e.message.chain) for e in pub]
+        finally:
+            await inst.terminate()
+
+    merged = await _merge_texts(1, True)
+    print(f"       同一条消息 1s 窗口: {merged}")
+    check("同一条消息两次贴表情 → 1 条唤醒", len(merged) == 1, merged)
+    check("合并后包含两个表情 ID",
+          bool(merged) and "ID: 4" in merged[0] and "ID: 66" in merged[0], merged)
+
+    split = await _merge_texts(1, False)
+    print(f"       不同消息 1s 窗口: {len(split)} 条")
+    check("不同消息不合并 → 2 条唤醒", len(split) == 2, len(split))
+
+    no_merge = await _merge_texts(0, True)
+    print(f"       合并=0: {len(no_merge)} 条")
+    check("0 = 不合并", len(no_merge) == 2, len(no_merge))
+
+    print("\n=== 21. 他人消息被贴表情：共用同一个合并窗口 ===")
+
+    async def _others_merge(merge_seconds, same_message):
+        a, _calls = fresh_adapter()
+        inst, pub, _ = await build_plugin(
+            a, overrides={"wake_others_emoji": True,
+                          "wake_others_emoji_cooldown": 0,
+                          "wake_emoji_merge_seconds": merge_seconds})
+        try:
+            await inst.locator.record_incoming("900911", "3967118487", "C7", "别人的消息")
+            await inst.locator.record_incoming("900912", "3967118487", "C7", "另一条消息")
+            targets = ("900911", "900911") if same_message else ("900911", "900912")
+            for i, mid in enumerate(targets):
+                eid = "4" if i == 0 else "66"
+                for e in await push_notice(a, _QUEUE[0],
+                                           make_emoji_like(1001 + i, int(mid), GID, SELF, emoji_id=eid)):
+                    await inst.on_im_message(e)
+            await asyncio.sleep(max(merge_seconds, 0) + 0.6)
+            return ["".join(getattr(x, "text", "") for x in e.message.chain) for e in pub]
+        finally:
+            await inst.terminate()
+
+    om = await _others_merge(1, True)
+    print(f"       他人同消息 1s 窗口: {om}")
+    check("他人同消息两次贴 → 1 条唤醒", len(om) == 1, om)
+    check("合并后包含两位贴表情的人",
+          bool(om) and "用户1001" in om[0] and "用户1002" in om[0], om)
+    check("合并后包含两个表情 ID",
+          bool(om) and "ID: 4" in om[0] and "ID: 66" in om[0], om)
+
+    om2 = await _others_merge(1, False)
+    print(f"       他人不同消息 1s 窗口: {len(om2)} 条")
+    check("他人不同消息不合并 → 2 条", len(om2) == 2, len(om2))
 
     print("\n" + "=" * 60)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

@@ -209,8 +209,9 @@ def render_env_summary(
             ))
         if not items:
             return ""
-        # 时间线：新→旧
-        items.sort(key=lambda x: x[0], reverse=True)
+        # 时间线：旧→新（最新的事件排在最后一行，符合"从上往下读"的聊天习惯）
+        # 排序键是事件原始时间戳（秒），同一秒内保持插入顺序（稳定排序）
+        items.sort(key=lambda x: x[0])
         lines = []
         for ts, text in items:
             if show_time:
