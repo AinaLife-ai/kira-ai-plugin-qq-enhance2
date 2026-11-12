@@ -17,7 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_core import _install_framework_stubs  # noqa
+# 先加框架路径（让 test_core 的条件 stub 检测到真实框架，不装 stub）
+from tests.real_adapter import ensure_framework_path, make_real_adapter
+ensure_framework_path()
 
 from qq_core.fmt import normalize_file_uri
 
@@ -128,23 +130,6 @@ check("成功时报告", 'results.append("头像已更新")' in src)
 print("\n=== 7. 端到端：模拟设置头像 ===")
 
 
-class RecordingBot:
-    def __init__(self, resp=None):
-        self.calls = []
-        self.resp = resp or {"status": "ok", "data": {}}
-
-    async def send_action(self, action, params, timeout=10.0):
-        self.calls.append((action, params))
-        if action == "get_stranger_info":
-            return {"status": "ok", "data": {"nickname": "测试", "sign": "", "sex": 1}}
-        return self.resp
-
-
-class FakeAdapter:
-    def __init__(self, resp=None):
-        self.bot = RecordingBot(resp)
-
-
 class CtxMin:
     class provider_mgr:
         @staticmethod
@@ -153,8 +138,21 @@ class CtxMin:
     config = {"locale": {"lang": "zh"}}
 
 
+def make_adapter_with(resp=None):
+    """用真实 QQAdapter，通过 api_overrides 控制返回。"""
+    overrides = {}
+    if resp is not None:
+        # 所有 action 都返回这个响应
+        overrides = {a: (lambda p, r=resp: r) for a in (
+            "set_qq_avatar", "set_group_portrait", "set_qq_profile",
+            "set_group_card", "set_group_special_title", "get_qq_avatar",
+        )}
+    adapter, queue, calls = make_real_adapter(api_overrides=overrides)
+    return adapter, calls
+
+
 async def e2e_avatar():
-    adapter = FakeAdapter()
+    adapter, calls = make_adapter_with()
     tool = QQProfileTool(ctx=CtxMin(), adapter=adapter, self_id="100")
 
     class Ev:
@@ -162,7 +160,7 @@ async def e2e_avatar():
             return True
 
     out = await tool.execute(Ev(), avatar="A" * 200)
-    return adapter.bot.calls, out
+    return calls, out
 
 
 calls, out = run(e2e_avatar())
@@ -180,7 +178,7 @@ from tools.qq_group_profile import QQGroupProfileTool
 
 
 async def e2e_group_portrait():
-    adapter = FakeAdapter()
+    adapter, calls = make_adapter_with()
     tool = QQGroupProfileTool(ctx=CtxMin(), adapter=adapter, self_id="100")
 
     class Ev:
@@ -190,7 +188,7 @@ async def e2e_group_portrait():
             session_id = "188395693"
 
     out = await tool.execute(Ev(), group_portrait="https://a.com/g.png")
-    return adapter.bot.calls, out
+    return calls, out
 
 
 gcalls, gout = run(e2e_group_portrait())
@@ -208,7 +206,7 @@ print("\n=== 9. 端到端：失败降级 ===")
 
 
 async def e2e_fail():
-    adapter = FakeAdapter(resp={"status": "failed", "wording": "权限不足"})
+    adapter, _calls = make_adapter_with(resp={"status": "failed", "wording": "权限不足"})
     tool = QQGroupProfileTool(ctx=CtxMin(), adapter=adapter, self_id="100")
 
     class Ev:

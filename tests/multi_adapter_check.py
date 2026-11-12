@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_core import _install_framework_stubs  # noqa
+from tests.real_adapter import ensure_framework_path, make_real_adapter
+ensure_framework_path()
 
 PASS, FAIL = [], []
 
@@ -43,41 +44,20 @@ def run(coro):
 print("\n=== 1. 多适配器映射 ===")
 
 
-class FakeBot:
-    def __init__(self, tag):
-        self.tag = tag
-        self.calls = []
+def make_two_adapters():
+    """构造两个真实 QQAdapter（不同号），用于多号验证。
 
-    async def send_action(self, action, params, timeout=10.0):
-        self.calls.append((action, params))
-        return {"status": "ok", "data": {"nickname": f"{self.tag}"}}
-
-    async def get_msg(self, mid):
-        self.calls.append(("get_msg", mid))
-        # 按 tag 返回不同用户，便于区分走了哪个 adapter
-        uid = "1001" if self.tag == "A" else "2002"
-        return {"status": "ok", "data": {
-            "user_id": int(uid),
-            "sender": {"nickname": f"{self.tag}的用户"},
-            "message": [{"type": "text", "data": {"text": f"{self.tag}的消息"}}],
-            "time": 0,
-        }}
-
-
-class FakeAdapter:
-    def __init__(self, name, self_id):
-        self.platform = "QQ"
-        # tag 取账号末位区分（111→A, 222→B）
-        self.bot = FakeBot("A" if self_id == "111" else "B")
-        self.config = {"self_id": self_id}
-        self.name = name
-
-        class Info:
-            pass
-        self.info = Info()
-        self.info.name = name
-        self.info.platform = "QQ"
-        self.info.config = {"self_id": self_id}
+    用 msg_sender 区分：A 号返回 1001，B 号返回 2002。
+    """
+    ad_a, q_a, calls_a = make_real_adapter(
+        self_id="111", adapter_name="napcat",
+        nicknames={"1001": "A号看到的人"}, msg_sender=1001,
+    )
+    ad_b, q_b, calls_b = make_real_adapter(
+        self_id="222", adapter_name="llonebot",
+        nicknames={"2002": "B号看到的人"}, msg_sender=2002,
+    )
+    return (ad_a, q_a, calls_a), (ad_b, q_b, calls_b)
 
 
 class Ctx:
@@ -90,8 +70,10 @@ class Ctx:
             def get_all_adapters(self):
                 return list(self._ads)
             def get_adapter(self, name):
+                # 真实 BaseAdapter 用 info.name（没有 .name 属性）
                 for a in self._ads:
-                    if a.name == name:
+                    an = getattr(getattr(a, "info", None), "name", None) or getattr(a, "name", None)
+                    if an == name:
                         return a
                 return None
         self.adapter_mgr = Mgr(adapters)
@@ -109,20 +91,26 @@ class Ctx:
 
 
 # 模拟两个号：napcat(111) 和 llonebot(222)
-ad_a = FakeAdapter("napcat", "111")
-ad_b = FakeAdapter("llonebot", "222")
+(ad_a, q_a, calls_a), (ad_b, q_b, calls_b) = make_two_adapters()
 ctx = Ctx([ad_a, ad_b])
 
 from qq_core.message_locator import MessageLocator
 from qq_core.wake_scheduler import WakeScheduler
 
-# 模拟 main.py 的 _adapters 构建逻辑
+# 模拟 main.py 的 _adapters 构建逻辑（与 main.py 保持一致的平台检测）
 adapters_map = {}
 for ada in ctx.adapter_mgr.get_all_adapters():
-    if getattr(ada, "platform", None) != "QQ":
+    platform = (
+        getattr(getattr(ada, "info", None), "platform", None)
+        or getattr(ada, "platform", None)
+        or ""
+    )
+    if str(platform).upper() != "QQ":
         continue
-    name = getattr(getattr(ada, "info", None), "name", None) or getattr(ada, "name", "")
-    self_id = str((getattr(ada, "config", None) or {}).get("self_id", "") or "")
+    info = getattr(ada, "info", None)
+    name = (getattr(info, "name", None) or getattr(ada, "name", None) or "")
+    cfg = getattr(ada, "config", None) or getattr(info, "config", None) or {}
+    self_id = str(cfg.get("self_id", "") or "") if isinstance(cfg, dict) else ""
     if name:
         adapters_map[name] = (ada, self_id)
 
@@ -145,10 +133,14 @@ print(f"  napcat 消息: {r1}")
 print(f"  llonebot 消息: {r2}")
 check("napcat sid 走 napcat adapter", r1 and r1["sender"] == "1001", str(r1))
 check("llonebot sid 走 llonebot adapter", r2 and r2["sender"] == "2002", str(r2))
-check("两个 adapter 各自被调用", 
-      ("get_msg", "m1") in [tuple(c) for c in ad_a.bot.calls] and
-      ("get_msg", "m2") in [tuple(c) for c in ad_b.bot.calls],
-      f"A={ad_a.bot.calls} B={ad_b.bot.calls}")
+def _called(calls, action, mid):
+    return any(a == action and isinstance(p, dict) and p.get("message_id") == mid
+               for a, p in calls)
+
+
+check("两个 adapter 各自被调用",
+      _called(calls_a, "get_msg", "m1") and _called(calls_b, "get_msg", "m2"),
+      f"A={calls_a} B={calls_b}")
 
 
 print("\n=== 3. is_self 判定用对应号的 self_id ===")
@@ -193,7 +185,7 @@ check("未知 adapter 回退默认（不崩）", r3 is not None or True, str(r3)
 
 
 print("\n=== 6. 单适配器场景不受影响 ===")
-ad_only = FakeAdapter("napcat", "111")
+ad_only, _qo, _co = make_real_adapter(self_id="111", adapter_name="napcat")
 ctx1 = Ctx([ad_only])
 map1 = {"napcat": (ad_only, "111")}
 loc3 = MessageLocator(adapter=ad_only, self_id="111",

@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # 复用框架 stub（独立测试环境无 KiraAI）
-from tests.test_core import _install_framework_stubs  # noqa
+from tests.real_adapter import ensure_framework_path, make_real_adapter
+ensure_framework_path()
 
 import qq_core.wake_scheduler as ws_mod
 from qq_core.event_normalizer import (
@@ -167,12 +168,8 @@ def test_bug14_recall_not_cleared_on_miss():
     from core.provider import LLMRequest
     from core.prompt_manager import Prompt
 
-    class FakeBot:
-        async def send_action(self, *a, **k):
-            return {"status": "ok", "data": {}}
-    class FakeAdapter:
-        bot = FakeBot()
-    locator = MessageLocator(adapter=FakeAdapter(), self_id="1")
+    _ad, _q, _ = make_real_adapter(self_id="1", roles={"1001": "admin"})
+    locator = MessageLocator(adapter=_ad, self_id="1")
     locator._cache["888"] = {"sender": "1001", "sender_name": "张三",
                              "text": "被撤回的原文", "ts": time.time(), "is_self": False}
 
@@ -202,12 +199,8 @@ def test_bug14_recall_cleared_on_hit():
     from core.provider import LLMRequest
     from core.prompt_manager import Prompt
 
-    class FakeBot:
-        async def send_action(self, *a, **k):
-            return {"status": "ok", "data": {}}
-    class FakeAdapter:
-        bot = FakeBot()
-    locator = MessageLocator(adapter=FakeAdapter(), self_id="1")
+    _ad, _q, _ = make_real_adapter(self_id="1", roles={"1001": "admin"})
+    locator = MessageLocator(adapter=_ad, self_id="1")
     locator._cache["888"] = {"sender": "1001", "sender_name": "张三",
                              "text": "被撤回的原文", "ts": time.time(), "is_self": False}
 

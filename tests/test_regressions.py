@@ -22,7 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # 复用 test_core 的框架 stub
-from tests.test_core import _install_framework_stubs  # noqa
+from tests.real_adapter import ensure_framework_path, make_real_adapter
+ensure_framework_path()
 
 from qq_core.emoji_rewriter import (
     archive_emoji_like, rewrite_emoji_like, clear_emoji_archive, _EMOJI_STORE,
@@ -67,24 +68,13 @@ def _make_scheduler(**kw):
         async def publish(self, e):
             self.published.append(e)
 
-    class FakeBot:
-        async def send_action(self, *a, **k):
-            return {"status": "ok", "data": {}}
-
-    class FakeAdapter:
-        platform = "QQ"
-        bot = FakeBot()
-        class info:
-            name = "napcat"
-            platform = "QQ"
-            config = {"self_id": "3003"}
-        def get_client(self):
-            return self.bot
+    # 真实 QQAdapter（mock send_action）
+    real_adapter, _q, _calls = make_real_adapter(self_id="3003")
 
     class MockAdapterMgr:
         @staticmethod
         def get_adapter(name):
-            return FakeAdapter()
+            return real_adapter
 
     class MockCtx:
         def __init__(self):
@@ -95,7 +85,7 @@ def _make_scheduler(**kw):
 
     ctx = MockCtx()
     defaults = dict(
-        ctx=ctx, adapter=FakeAdapter(), self_id="3003", message_locator=None,
+        ctx=ctx, adapter=real_adapter, self_id="3003", message_locator=None,
     )
     defaults.update(kw)
     return WakeScheduler(**defaults), ctx

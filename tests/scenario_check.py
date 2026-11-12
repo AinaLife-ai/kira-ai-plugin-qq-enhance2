@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_core import _install_framework_stubs  # noqa
+from tests.real_adapter import ensure_framework_path, make_real_adapter, make_poke
+ensure_framework_path()
 
 from core.prompt_manager import Prompt
 from core.provider import LLMRequest
@@ -58,36 +59,16 @@ SID = "napcat:gm:188395693"
 SELF_ID = "3003003"
 
 
-class FakeBot:
-    """模拟协议端：记录调用，返回合理数据。"""
-    def __init__(self):
-        self.calls = []
-
-    async def send_action(self, action, params, timeout=10.0):
-        self.calls.append((action, params))
-        if action == "get_group_member_info":
-            uid = str(params.get("user_id", ""))
-            role = "admin" if uid == "8888" else "member"
-            return {"status": "ok", "data": {
-                "card": "", "nickname": f"用户{uid}", "title": "", "role": role,
-            }}
-        if action == "get_stranger_info":
-            return {"status": "ok", "data": {
-                "nickname": f"用户{params.get('user_id')}",
-                "sign": "签名内容", "sex": 1,
-            }}
-        if action == "get_msg":
-            return {"status": "ok", "data": {
-                "user_id": 1001, "time": int(time.time()),
-                "sender": {"nickname": "张三"},
-                "message": [{"type": "text", "data": {"text": "被撤回的原始消息内容"}}],
-            }}
-        return {"status": "ok", "data": {}}
-
-
-class FakeAdapter:
-    def __init__(self):
-        self.bot = FakeBot()
+def make_adapter(roles=None, nicknames=None):
+    """用真实 QQAdapter（mock send_action）。"""
+    return make_real_adapter(
+        self_id=SELF_ID,
+        nicknames=nicknames or {"1001": "张三", "1003": "王五", "1005": "赵六",
+                                "1007": "孙七", "2002": "李四", "8888": "管理员A"},
+        roles=roles or {"8888": "admin"},
+        msg_text="被撤回的原始消息内容",
+        msg_sender=1001,
+    )
 
 
 print("\n=== 场景 1：群聊连续事件 → 环境摘要 ===")
@@ -139,7 +120,8 @@ check("摘要长度合理（<400 字符）", len(summary) < 400, f"{len(summary)
 
 print("\n=== 场景 2：撤回改写 ===")
 
-locator = MessageLocator(adapter=FakeAdapter(), self_id=SELF_ID)
+_ad, _q, _c = make_adapter()
+locator = MessageLocator(adapter=_ad, self_id=SELF_ID)
 for mid, sender, name, text in [
     ("100", "1001", "张三", "这是要被撤回的消息"),
     ("101", "1003", "王五", "这条不会撤回"),

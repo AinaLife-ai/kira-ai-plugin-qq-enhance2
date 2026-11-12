@@ -104,7 +104,15 @@ def _install_framework_stubs():
 
     adapter_info = types.ModuleType("core.adapter.adapter_info")
     class AdapterInfo:
-        pass
+        """对齐真实 dataclass 字段（enabled/adapter_id/name/platform/description/config）。"""
+        def __init__(self, enabled=True, adapter_id="", name="", platform="",
+                     description="", config=None):
+            self.enabled = enabled
+            self.adapter_id = adapter_id
+            self.name = name
+            self.platform = platform
+            self.description = description
+            self.config = config if isinstance(config, dict) else {}
     adapter_info.AdapterInfo = AdapterInfo
     sys.modules["core.adapter.adapter_info"] = adapter_info
     adapter_pkg = types.ModuleType("core.adapter")
@@ -242,7 +250,24 @@ def _install_framework_stubs():
     prompt_mod.Prompt = _Prompt
     sys.modules["core.prompt_manager"] = prompt_mod
 
-_install_framework_stubs()
+
+def _has_real_framework() -> bool:
+    """检测是否可导入真实 KiraAI 框架（优先真实类，stub 只作兜底）。"""
+    try:
+        import core.plugin.manager  # noqa: F401
+        import core.chat.message_utils  # noqa: F401
+        import core.adapter.context  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# 只在没有真实框架时安装 stub。
+# ⚠ 关键：无条件安装会污染真实框架环境（把 core.* 换成 stub），
+# 导致测试永远接触不到真实类，从而掩盖"真实类结构与 mock 不符"的 bug
+# （第九轮就因此漏了 8 轮）。
+if not _has_real_framework():
+    _install_framework_stubs()
 
 # 添加插件根目录到 sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))

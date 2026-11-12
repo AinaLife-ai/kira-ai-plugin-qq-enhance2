@@ -16,6 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from tests.real_adapter import ensure_framework_path, make_real_adapter
+ensure_framework_path()
+
 PLUGIN_ROOT = Path(__file__).parent.parent
 
 
@@ -37,28 +40,10 @@ async def plugin_env(monkeypatch, tmp_path):
     from core.plugin.manager import PluginManager
     from core.plugin.plugin_context import PluginContext
 
-    # 构造完整可用的 mock adapter
-    class FakeBot:
-        def __init__(self):
-            self.calls = []
-        async def send_action(self, action, params, timeout=10.0):
-            self.calls.append((action, params))
-            return {"status": "ok", "data": {}}
-
-    class FakeAdapter:
-        platform = "QQ"
-        class info:
-            name = "napcat"
-            platform = "QQ"
-            config = {"self_id": "10000"}
-            supported_elements = ["text"]
-        def __init__(self):
-            self.bot = FakeBot()
-            self.config = {"self_id": "10000"}
-        def get_client(self):
-            return self.bot
-
-    adapter = FakeAdapter()
+    # 用真实 QQAdapter（mock 底层 send_action）
+    adapter, _queue, _calls = make_real_adapter(
+        self_id="10000", adapter_name="napcat",
+    )
 
     context = object.__new__(PluginContext)
     context.config = MagicMock()
@@ -231,18 +216,10 @@ def test_e2e_recall_rewrite(plugin_env, tmp_path):
     from core.provider import LLMRequest
     from core.prompt_manager import Prompt
 
-    class FakeBot:
-        async def send_action(self, action, params, timeout=10.0):
-            if action == "get_group_member_info":
-                return {"status": "ok", "data": {"role": "admin"}}
-            return {"status": "ok", "data": {}}
-
-    class FakeAdapter:
-        bot = FakeBot()
-        class info:
-            name = "napcat"
-
-    locator = MessageLocator(adapter=FakeAdapter(), self_id="10000")
+    _ad2, _q2, _ = make_real_adapter(
+        self_id="10000", roles={"2002": "admin"},
+    )
+    locator = MessageLocator(adapter=_ad2, self_id="10000")
     locator._cache["888"] = {
         "sender": "1001", "sender_name": "张三",
         "text": "被撤回的消息", "ts": time.time(), "is_self": False,
