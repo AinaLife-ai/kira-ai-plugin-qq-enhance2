@@ -65,6 +65,8 @@ class WakeScheduler:
         wake_quiet_hours: str = "",
         wake_max_per_hour: int = 60,
         wake_hint: str = "",
+        wake_self_emoji_cooldown: int = 0,
+        wake_emoji_merge_seconds: int = 5,
         self_id_resolver=None,
     ):
         self.ctx = ctx
@@ -85,6 +87,10 @@ class WakeScheduler:
         # 互动提示（单个配置，空=不加）。只加在"互动类"唤醒上：
         # 被贴表情（自己/他人）、资料卡被赞；头衔/被踢不加（没什么可互动的）。
         self.wake_hint = str(wake_hint or "").strip()
+        # 自己被贴表情的唤醒冷却（秒）；0 = 不冷却（默认）
+        self.wake_self_emoji_cooldown = int(wake_self_emoji_cooldown or 0)
+        # 同一条消息的多个贴表情在这个窗口内合并成一条唤醒（自己/他人共用）；0 = 不合并
+        self.wake_emoji_merge_seconds = int(wake_emoji_merge_seconds or 0)
 
         # 点赞累加器：sid → {operator: {count, first_ts, last_ts}}
         self._like_accumulator: dict[str, dict[str, dict]] = {}
@@ -94,6 +100,14 @@ class WakeScheduler:
         self._hourly_wake_count: dict[str, dict[int, int]] = {}
         # 他人贴表情唤醒冷却：sid → 上次唤醒时间
         self._others_emoji_wake_ts: dict[str, float] = {}
+        # 自己被贴表情唤醒冷却：sid → 上次唤醒时间
+        self._self_emoji_wake_ts: dict[str, float] = {}
+        # 自己被贴表情合并： (sid, message_id) → 累计条目
+        self._self_emoji_acc: dict[tuple, dict] = {}
+        self._self_emoji_tasks: dict[tuple, asyncio.Task] = {}
+        # 他人消息被贴表情合并（同样的窗口）
+        self._others_emoji_acc: dict[tuple, dict] = {}
+        self._others_emoji_tasks: dict[tuple, asyncio.Task] = {}
         # anti-harass 屏蔽名单缓存：{qq: expire_ts}
         self._harass_blocklist: dict[str, float] = {}
         self._last_blocklist_load: float = 0.0
@@ -235,7 +249,10 @@ class WakeScheduler:
     async def trigger_others_emoji_like(self, event: QQEvent, message_author: str,
                                         message_author_name: str, msg_excerpt: str,
                                         *, in_buffer: bool = False):
-        """触发"他人消息被贴表情"唤醒（默认冷却 20 秒）。
+        """触发"他人消息被贴表情"唤醒（同一消息短时间内的多次贴表情会合并）。
+
+        合并窗口与他人/自己被贴共用 `wake_emoji_merge_seconds`（默认 5 秒）。
+        冷却 `wake_others_emoji_cooldown`（默认 20 秒）在**真正发布**时计时。
 
         Args:
             event: 贴表情事件。
@@ -245,28 +262,101 @@ class WakeScheduler:
             in_buffer: 被贴的那条消息是否还在会话缓冲区里。
                 True = 它会被同批次一起送给 LLM（自己带 `↑` 标注）→ 不再复述事实，
                 只留互动提示（若没配提示则仍用事实兜底，否则唤醒无正文）。
-                False = 消息已经发过/被丢弃 → 事实是唯一信息来源，照常写。
         """
-        now = time.time()
-        self._others_emoji_wake_ts[event.sid] = now
+        key = (event.sid, str(event.extra.get("message_id") or ""))
+        meta = {
+            "author": str(message_author or ""),
+            "author_name": str(message_author_name or ""),
+            "excerpt": str(msg_excerpt or ""),
+            "in_buffer": bool(in_buffer),
+        }
 
-        emoji_ids = event.extra.get("emoji_ids", [])
-        count = event.extra.get("count", 1)
+        if self.wake_emoji_merge_seconds <= 0:
+            acc = self._merge_others_emoji(None, event, meta)
+            await self._settle_others_emoji(key, acc)
+            return
+
+        acc = self._others_emoji_acc.get(key)
+        if acc is None:
+            acc = {"emoji_ids": [], "count": 0, "actors": {},
+                   "first_ts": time.time(), "last_ts": time.time(), **meta}
+            self._others_emoji_acc[key] = acc
+        self._merge_others_emoji(acc, event, meta)
+        self._schedule_others_emoji_settle(key)
+
+    @staticmethod
+    def _merge_others_emoji(acc: dict | None, event: QQEvent, meta: dict) -> dict:
+        """把一次"他人消息被贴"并入累计条目（acc=None 时新建）。"""
+        if acc is None:
+            acc = {"emoji_ids": [], "count": 0, "actors": {},
+                   "first_ts": time.time(), "last_ts": time.time(), **meta}
+        for e in event.extra.get("emoji_ids", []) or []:
+            if e and e not in acc["emoji_ids"]:
+                acc["emoji_ids"].append(e)
+        try:
+            cnt = int(event.extra.get("count", 1) or 1)
+        except (TypeError, ValueError):
+            cnt = 1
+        acc["count"] += max(1, cnt)
+        if event.actor:
+            acc["actors"][str(event.actor)] = event.actor_name or ""
+        acc["last_ts"] = time.time()
+        return acc
+
+    def _schedule_others_emoji_settle(self, key: tuple):
+        old = self._others_emoji_tasks.pop(key, None)
+        if old and not old.done():
+            old.cancel()
+        self._others_emoji_tasks[key] = asyncio.create_task(
+            self._others_emoji_settle_after(key))
+
+    async def _others_emoji_settle_after(self, key: tuple):
+        try:
+            await asyncio.sleep(self.wake_emoji_merge_seconds)
+        except asyncio.CancelledError:
+            return
+        self._others_emoji_tasks.pop(key, None)
+        acc = self._others_emoji_acc.pop(key, None)
+        if not acc:
+            return
+        await self._settle_others_emoji(key, acc)
+
+    async def _settle_others_emoji(self, key: tuple, acc: dict):
+        """组装并发布一条"他人消息被贴表情"唤醒。"""
+        sid = key[0]
+        now = time.time()
+
+        # 冷却（独立配置，默认 20 秒；0 = 不冷却）
+        if self.wake_others_emoji_cooldown > 0:
+            last = self._others_emoji_wake_ts.get(sid, 0.0)
+            if now - last < self.wake_others_emoji_cooldown:
+                logger.debug(f"[QQ增强2] 他人贴表情唤醒冷却中: sid={sid}")
+                return
+
         from .emoji_display import format_emoji_list
-        emoji_str = format_emoji_list(emoji_ids, count)
-        # 对齐框架 [Emoji {desc} (ID: {id})] 格式：bot 拿到 ID 才能回贴
         from .fmt import fmt_user
-        text = f"[System {fmt_user(event.actor, event.actor_name)}给{fmt_user(message_author, message_author_name)}的消息贴了{emoji_str}"
-        if msg_excerpt:
-            text += f"（\"{msg_excerpt[:20]}...\"）"
+        actors = list(acc.get("actors", {}).items())
+        if actors:
+            names = [fmt_user(qq, nm) for qq, nm in actors[:5]]
+            more = f"等{len(actors)}人" if len(actors) > 5 else ""
+            who = "、".join(names) + more
+        else:
+            who = "有人"
+        target = fmt_user(acc.get("author", ""), acc.get("author_name", ""))
+        emoji_str = format_emoji_list(acc.get("emoji_ids", []), acc.get("count", 1))
+        text = f"[System {who}给{target}的消息贴了{emoji_str}"
+        excerpt = str(acc.get("excerpt") or "")
+        if excerpt:
+            text += f"（\"{excerpt[:20]}...\"）"
         text += "]"
         # in_buffer 时不复述事实（那条消息自己带着 ↑ 标注，会同批送达）
-        body = self._compose_text(text, with_fact=not in_buffer)
-        if in_buffer and self.wake_hint:
-            logger.debug(
-                f"[QQ增强2] 被贴消息在缓冲区内，省略事实复述: sid={event.sid}")
-        await self._trigger_text(event.sid, body, "others_emoji_like",
-                                actor_qq=event.actor, actor_name=event.actor_name)
+        body = self._compose_text(text, with_fact=not acc.get("in_buffer", False))
+        actor_qq = actors[0][0] if actors else ""
+        actor_name = actors[0][1] if actors else ""
+        ok = await self._trigger_text(sid, body, "others_emoji_like",
+                                      actor_qq=actor_qq, actor_name=actor_name)
+        if ok:
+            self._others_emoji_wake_ts[sid] = time.time()
 
     async def _is_self_message(self, event: QQEvent) -> bool:
         """判断事件的目标消息是否是 bot 自己的。
@@ -440,8 +530,14 @@ class WakeScheduler:
         await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator,
                                 actor_name=actor_name)
 
-    async def trigger_emoji_like_self(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
-        """触发"自己消息被贴表情"唤醒。
+    async def trigger_emoji_like_self(self, event: QQEvent, message_author: str,
+                                      message_author_name: str, msg_excerpt: str):
+        """"自己消息被贴表情"唤醒（同一消息短时间内的多次贴表情会合并）。
+
+        - 合并窗口：`wake_self_emoji_merge_seconds`（默认 5 秒，0=不合并）。
+          同一条消息在窗口内被贴多个表情 → 组装成一条通知。
+        - 冷却：`wake_self_emoji_cooldown`（默认 10 秒，0=不冷却），
+          在真正发布唤醒后计时，被静默/配额拦截不占用。
 
         Args:
             event: 贴表情事件。
@@ -449,19 +545,103 @@ class WakeScheduler:
             message_author_name: 被贴消息作者昵称。
             msg_excerpt: 被贴消息摘要。
         """
-        emoji_ids = event.extra.get("emoji_ids", [])
-        count = event.extra.get("count", 1)
+        key = (event.sid, str(event.extra.get("message_id") or ""))
+        now = time.time()
+
+        if self.wake_emoji_merge_seconds <= 0:
+            # 不合并：直接走一次性结算
+            acc = self._merge_self_emoji(None, event, msg_excerpt)
+            await self._settle_self_emoji(key, acc)
+            return
+
+        acc = self._self_emoji_acc.get(key)
+        if acc is None:
+            acc = {
+                "emoji_ids": [], "count": 0, "actors": {},
+                "excerpt": msg_excerpt or "", "first_ts": now, "last_ts": now,
+            }
+            self._self_emoji_acc[key] = acc
+        self._merge_self_emoji(acc, event, msg_excerpt)
+        self._schedule_self_emoji_settle(key)
+
+    @staticmethod
+    def _merge_self_emoji(acc: dict | None, event: QQEvent, msg_excerpt: str) -> dict:
+        """把一次贴表情并入累计条目（acc=None 时新建一个一次性条目）。"""
+        if acc is None:
+            acc = {"emoji_ids": [], "count": 0, "actors": {},
+                   "excerpt": msg_excerpt or "", "first_ts": time.time(),
+                   "last_ts": time.time()}
+        for e in event.extra.get("emoji_ids", []) or []:
+            if e and e not in acc["emoji_ids"]:
+                acc["emoji_ids"].append(e)
+        try:
+            cnt = int(event.extra.get("count", 1) or 1)
+        except (TypeError, ValueError):
+            cnt = 1
+        acc["count"] += max(1, cnt)
+        if event.actor:
+            acc["actors"][str(event.actor)] = event.actor_name or ""
+        if not acc.get("excerpt") and msg_excerpt:
+            acc["excerpt"] = msg_excerpt
+        acc["last_ts"] = time.time()
+        return acc
+
+    def _schedule_self_emoji_settle(self, key: tuple):
+        """（重）调度合并结算定时器：窗口内每次新贴都重置。"""
+        old = self._self_emoji_tasks.pop(key, None)
+        if old and not old.done():
+            old.cancel()
+        self._self_emoji_tasks[key] = asyncio.create_task(
+            self._self_emoji_settle_after(key))
+
+    async def _self_emoji_settle_after(self, key: tuple):
+        try:
+            await asyncio.sleep(self.wake_emoji_merge_seconds)
+        except asyncio.CancelledError:
+            return
+        self._self_emoji_tasks.pop(key, None)
+        acc = self._self_emoji_acc.pop(key, None)
+        if not acc:
+            return
+        await self._settle_self_emoji(key, acc)
+
+    async def _settle_self_emoji(self, key: tuple, acc: dict):
+        """组装并发布一条"自己被贴表情"唤醒。"""
+        sid = key[0]
+        now = time.time()
+
+        # 冷却（独立配置，默认 10 秒；0 = 不冷却）
+        if self.wake_self_emoji_cooldown > 0:
+            last = self._self_emoji_wake_ts.get(sid, 0.0)
+            if now - last < self.wake_self_emoji_cooldown:
+                logger.debug(
+                    f"[QQ增强2] 自己被贴表情唤醒冷却中: sid={sid}, "
+                    f"剩余 {self.wake_self_emoji_cooldown - (now - last):.0f}s")
+                return
+
         from .emoji_display import format_emoji_list
-        emoji_str = format_emoji_list(emoji_ids, count)
         from .fmt import fmt_user
-        text = f"[System {fmt_user(event.actor, event.actor_name)}给你贴了{emoji_str}"
-        if msg_excerpt:
-            text += f"（\"{msg_excerpt[:20]}...\"）"
+        actors = list(acc.get("actors", {}).items())
+        if actors:
+            names = [fmt_user(qq, nm) for qq, nm in actors[:5]]
+            more = f"等{len(actors)}人" if len(actors) > 5 else ""
+            who = "、".join(names) + more
+        else:
+            who = "有人"
+        emoji_str = format_emoji_list(acc.get("emoji_ids", []), acc.get("count", 1))
+        text = f"[System {who}给你贴了{emoji_str}"
+        excerpt = str(acc.get("excerpt") or "")
+        if excerpt:
+            text += f"（\"{excerpt[:20]}...\"）"
         text += "]"
         # 自己的消息是 assistant 角色，改写器不标注 → 事实必须保留，再补提示
         text = self._compose_text(text)
-        await self._trigger_text(event.sid, text, "emoji_like_self",
-                                actor_qq=event.actor, actor_name=event.actor_name)
+        actor_qq = actors[0][0] if actors else ""
+        actor_name = actors[0][1] if actors else ""
+        ok = await self._trigger_text(sid, text, "emoji_like_self",
+                                      actor_qq=actor_qq, actor_name=actor_name)
+        if ok:
+            self._self_emoji_wake_ts[sid] = time.time()
 
     async def trigger_member_decrease(self, event: QQEvent):
         """退群/被踢 → notice 唤醒（对齐 QQ增强1 的入群感知）。
@@ -590,33 +770,36 @@ class WakeScheduler:
             event_type: 事件类型（用于日志）。
             actor_qq: 触发者 QQ（用于 anti-harass 屏蔽名单检查 + notice 的 user_id）。
             actor_name: 触发者昵称（日志/兼容用）。
+
+        Returns:
+            True = 已发布唤醒；False = 被静默/配额/屏蔽/无效 sid 拦截。
         """
         # 静默时段（统一收口，避免直接 trigger_* 绕过）
         if self._in_quiet_hours(time.time()):
             logger.debug(f"[QQ增强2] 唤醒被静默时段拦截: sid={sid}, type={event_type}")
-            return
+            return False
 
         # 每小时配额（唯一计数点）
         if not self._check_hourly_limit(sid):
             logger.debug(f"[QQ增强2] 唤醒被每小时上限拦截: sid={sid}, type={event_type}")
-            return
+            return False
 
         # 检查 anti-harass 屏蔽名单（按触发者用户检查）
         if await self._is_blocked(sid, actor_qq):
             logger.debug(f"[QQ增强2] 唤醒被屏蔽: sid={sid}, type={event_type}, actor={actor_qq}")
-            return
+            return False
 
         # 解析 sid
         parts = sid.split(":")
         if len(parts) != 3:
             logger.warning(f"[QQ增强2] 无效 sid: {sid}")
-            return
+            return False
         adapter_name, session_type, session_id = parts
 
         adapter_info = self.ctx.adapter_mgr.get_adapter(adapter_name)
         if not adapter_info:
             logger.warning(f"[QQ增强2] 适配器不存在: {adapter_name}")
-            return
+            return False
 
         # 构造 KiraMessageEvent
         group = None
@@ -665,6 +848,7 @@ class WakeScheduler:
         event.trigger()
         await self.ctx.event_bus.publish(event)
         logger.info(f"[QQ增强2] 唤醒已触发: sid={sid}, type={event_type}")
+        return True
 
     async def _is_blocked(self, sid: str, actor_qq: str = "", kind: str = "all") -> bool:
         """检查触发者是否被 anti-harass / S / Z 的屏蔽名单拦截。
@@ -786,6 +970,12 @@ class WakeScheduler:
         """
         tasks = list(self._like_settle_tasks.values())
         self._like_settle_tasks.clear()
+        tasks += list(self._self_emoji_tasks.values())
+        self._self_emoji_tasks.clear()
+        self._self_emoji_acc.clear()
+        tasks += list(self._others_emoji_tasks.values())
+        self._others_emoji_tasks.clear()
+        self._others_emoji_acc.clear()
         for t in tasks:
             if not t.done():
                 t.cancel()

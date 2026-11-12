@@ -177,6 +177,8 @@ async def test_wake_event():
     pid = await ctx.plugin_mgr.load_plugin_from_dir(ROOT, auto_install=False)
     inst = ctx.plugin_mgr.get_plugin_inst(pid)
     await inst.initialize()
+    # 本用例验证"唤醒事件形态"，关掉合并窗口保证即时发布
+    inst.wake_scheduler.wake_emoji_merge_seconds = 0
 
     # 记录自己的消息 → 触发"自己被贴表情"
     await inst.locator.record_incoming("888999", "3003003", "我", "我的消息", is_self=True)

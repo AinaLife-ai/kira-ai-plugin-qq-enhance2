@@ -55,6 +55,10 @@ class QQEnhance2Plugin(BasePlugin):
         self.collect_card_admin = self.plugin_cfg.get("collect_card_admin", False)
 
         self.wake_self_emoji = self.plugin_cfg.get("wake_self_emoji", True)
+        self.wake_self_emoji_cooldown = _safe_int(
+            self.plugin_cfg.get("wake_self_emoji_cooldown"), 10)
+        self.wake_emoji_merge_seconds = _safe_int(
+            self.plugin_cfg.get("wake_emoji_merge_seconds"), 5)
         self.wake_others_emoji = self.plugin_cfg.get("wake_others_emoji", False)
         # 数值配置用安全转换：用户手改配置文件或 WebUI 存成字符串时不应崩
         self.wake_others_emoji_cooldown = _safe_int(
@@ -177,6 +181,8 @@ class QQEnhance2Plugin(BasePlugin):
             self_id=self.self_id,
             message_locator=self.locator,
             wake_self_emoji=self.wake_self_emoji,
+            wake_self_emoji_cooldown=self.wake_self_emoji_cooldown,
+            wake_emoji_merge_seconds=self.wake_emoji_merge_seconds,
             wake_others_emoji=self.wake_others_emoji,
             wake_others_emoji_cooldown=self.wake_others_emoji_cooldown,
             wake_profile_like=self.wake_profile_like,
@@ -759,8 +765,8 @@ class QQEnhance2Plugin(BasePlugin):
                         operator_name=qq_event.actor_name,
                         ts=qq_event.ts,
                     )
-                # 检查是否需要唤醒（默认冷却 20 秒）
-                if self.wake_scheduler.should_wake_now(qq_event):
+                # 他人贴表情 → 唤醒（合并窗口 + 冷却都在调度器内部处理）
+                if self.wake_others_emoji:
                     # 被贴的消息是否还在会话缓冲区？
                     # 在 → 它会被同批次一起送给 LLM（自带 ↑ 标注）→ 唤醒正文不再复述事实
                     # 不在 → 事实是唯一信息来源，照常写
