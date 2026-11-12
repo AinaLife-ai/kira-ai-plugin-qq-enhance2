@@ -187,7 +187,8 @@ async def test_wake_flags():
     # wake_self_emoji：自己被贴表情
     async def self_emoji(wake: bool):
         adapter, q, _ = make_real_adapter(self_id=SELF_ID)
-        inst, pub = await build_plugin(adapter, {"wake_self_emoji": wake})
+        inst, pub = await build_plugin(adapter, {
+            "wake_self_emoji": wake, "wake_emoji_merge_seconds": 0})
         # 先记录自己的消息
         await inst.locator.record_incoming("111222333", SELF_ID, "我自己", "我的消息", is_self=True)
         evs = await push_notice(adapter, q, make_emoji_like(1005, 111222333, GID, SELF_ID))
@@ -249,6 +250,7 @@ async def test_quota_and_quiet():
     adapter, q, _ = make_real_adapter(self_id=SELF_ID)
     inst, pub = await build_plugin(adapter, {
         "wake_self_emoji": True, "wake_max_per_hour": 1,
+        "wake_emoji_merge_seconds": 0, "wake_self_emoji_cooldown": 0,
     })
     for i in range(3):
         await inst.locator.record_incoming(f"msg{i}", SELF_ID, "我", f"消息{i}", is_self=True)
@@ -263,6 +265,7 @@ async def test_quota_and_quiet():
     adapter2, q2, _ = make_real_adapter(self_id=SELF_ID)
     inst2, pub2 = await build_plugin(adapter2, {
         "wake_self_emoji": True, "wake_max_per_hour": -1,
+        "wake_emoji_merge_seconds": 0, "wake_self_emoji_cooldown": 0,
     })
     for i in range(3):
         await inst2.locator.record_incoming(f"m{i}", SELF_ID, "我", f"消息{i}", is_self=True)
@@ -282,6 +285,7 @@ async def test_quota_and_quiet():
     adapter3, q3, _ = make_real_adapter(self_id=SELF_ID)
     inst3, pub3 = await build_plugin(adapter3, {
         "wake_self_emoji": True, "wake_quiet_hours": quiet,
+        "wake_emoji_merge_seconds": 0,
     })
     await inst3.locator.record_incoming("qm", SELF_ID, "我", "消息", is_self=True)
     evs = await push_notice(adapter3, q3, make_emoji_like(1005, "qm", GID, SELF_ID))

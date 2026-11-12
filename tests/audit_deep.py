@@ -450,7 +450,8 @@ def r5_wake_scheduler_cooldown():
 
     ctx = C()
     s = WakeScheduler(ctx=ctx, adapter=A(), self_id="1", message_locator=None,
-                      wake_others_emoji=True, wake_others_emoji_cooldown=20, wake_max_per_hour=-1)
+                      wake_others_emoji=True, wake_others_emoji_cooldown=20,
+                      wake_max_per_hour=-1, wake_emoji_merge_seconds=0)
     ev = QQEvent(eid="1", etype=E_EMOJI_LIKE, sid="napcat:gm:1", ts=int(time.time()),
                  actor="2", extra={"message_id": "1", "emoji_ids": ["1"], "count": 1})
 
