@@ -39,6 +39,16 @@ SELF = "3991867505"
 GID = 188395693
 SID = f"napcat:gm:{GID}"
 
+
+class _FakeBuffer:
+    """最小 SessionBuffer 替身（只有 .buffer 列表）。"""
+
+    def __init__(self):
+        self.buffer = []
+
+
+_FAKE_BUFFER = _FakeBuffer()
+
 PASS, FAIL = [], []
 
 
@@ -70,6 +80,8 @@ def _ctx(adapter, published):
     context.provider_mgr = None
     tmp = tempfile.mkdtemp(prefix="qqe2_scope_")
     context.get_plugin_data_dir = lambda *a, **k: tmp
+    # 假会话缓冲区：用于验证「被贴消息是否还在 buffer」分支
+    context.get_buffer = lambda sid: _FAKE_BUFFER
     return context
 
 
@@ -316,6 +328,55 @@ async def main():
               evs[0].target_name if evs else "no event")
     finally:
         await inst.terminate()
+
+    print("\n=== 14. 他人贴表情：消息在缓冲区 → 省略事实复述 ===")
+    import types
+    from tests.real_adapter import make_emoji_like
+
+    class _Ev:
+        def __init__(self, mid):
+            self.message = types.SimpleNamespace(message_id=mid)
+
+    _FAKE_BUFFER.buffer = [_Ev("900777")]
+    adapter, _ = fresh_adapter()
+    inst, pub, _ = await build_plugin(adapter, overrides={"wake_others_emoji": True})
+    try:
+        await feed(adapter, inst, make_emoji_like(1001, 900777, GID, SELF))
+        text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
+        print(f"       唤醒正文: {text!r}")
+        check("有唤醒", bool(pub))
+        check("不复述事实（无 [System）", "[System" not in text, text)
+        check("带互动提示", "[互动提示]" in text, text)
+    finally:
+        await inst.terminate()
+
+    print("\n=== 15. 他人贴表情：消息不在缓冲区 → 保留事实 + 提示 ===")
+    _FAKE_BUFFER.buffer = []
+    adapter, _ = fresh_adapter()
+    inst, pub, _ = await build_plugin(adapter, overrides={"wake_others_emoji": True})
+    try:
+        await feed(adapter, inst, make_emoji_like(1001, 900778, GID, SELF))
+        text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
+        print(f"       唤醒正文: {text!r}")
+        check("有事实", "[System" in text and "贴了" in text, text)
+        check("有提示", "[互动提示]" in text, text)
+    finally:
+        await inst.terminate()
+
+    print("\n=== 16. 提示为空 + 在缓冲区 → 回退事实（否则空通知会被丢弃）===")
+    _FAKE_BUFFER.buffer = [_Ev("900779")]
+    adapter, _ = fresh_adapter()
+    inst, pub, _ = await build_plugin(
+        adapter, overrides={"wake_others_emoji": True, "wake_hint": ""})
+    try:
+        await feed(adapter, inst, make_emoji_like(1001, 900779, GID, SELF))
+        text = "".join(getattr(x, "text", "") for e in pub for x in e.message.chain) if pub else ""
+        print(f"       唤醒正文: {text!r}")
+        check("回退为事实", "[System" in text, text)
+        check("无提示", "[互动提示]" not in text, text)
+    finally:
+        await inst.terminate()
+    _FAKE_BUFFER.buffer = []
 
     print("\n" + "=" * 60)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

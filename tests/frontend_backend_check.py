@@ -175,8 +175,7 @@ check("每个配置项都有测试覆盖", not not_covered, str(not_covered))
 
 print("\n=== 6. 工具参数 ↔ 实现 ===")
 for tool_file, cls in (("tools/qq_profile.py", "QQProfileTool"),
-                       ("tools/qq_group_profile.py", "QQGroupProfileTool"),
-                       ("tools/fetch_emoji_like.py", "FetchEmojiLikeTool")):
+                       ("tools/qq_group_profile.py", "QQGroupProfileTool")):
     src = (ROOT / tool_file).read_text(encoding="utf-8")
     # parameters 里声明的属性
     m = re.search(r'"properties":\s*\{(.*?)\n        \}', src, re.S)

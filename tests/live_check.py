@@ -403,7 +403,7 @@ async def test_tool_inject():
     print(f"      注入工具: {names}")
     check("注入 qq_profile", "qq_profile" in names, str(names))
     check("注入 qq_group_profile", "qq_group_profile" in names, str(names))
-    check("注入 fetch_emoji_like", "fetch_emoji_like" in names, str(names))
+    check("不再注入 fetch_emoji_like", "fetch_emoji_like" not in names, str(names))
 
     # 检查工具绑定的 adapter 是当前会话的
     for t in (req.tool_set.tools if req.tool_set else []):

@@ -128,3 +128,36 @@ if __name__ == "__main__":
     test_idempotent()
     test_emoji_dict()
     print("=== 贴表情改写测试全部通过 ===")
+
+def test_notice_line_never_annotated():
+    """Notice 行是事件描述，不能被追加 `↑该条消息被贴了…`（用户实机反馈的重复）。"""
+    from qq_core.emoji_rewriter import EmojiRewriter
+    from qq_core.fmt import is_notice_line
+
+    rw = EmojiRewriter()
+    sid = "test:notice"
+    original = "这儿的规矩，就是个旁人管0_o"
+    rw.archive(sid=sid, message_id="900001", message_text=original,
+               emoji_ids=["66"], count=1, operator="769690776",
+               operator_name="周武", ts=int(time.time()))
+
+    notice_line = ("[Nov 13 2026 01:31 Fri] Notice [group_id: 188395693, user_id: 769690776] | "
+                   "[System 用户769690776(周武)给用户3967118487(C7)的消息贴了爱心 (ID: 66)"
+                   "（\"这儿的规矩，就是个旁人管0_o...\"）]")
+    message_line = ("[Nov 13 2026 01:28 Fri] [message_id: 900001] [group_name: 绿岛酒吧 "
+                    "group_id: 188395693 user_nickname: C7, user_id: 3967118487] | " + original)
+
+    assert is_notice_line(notice_line) is True
+    assert is_notice_line(message_line) is False
+
+    class Req:
+        def __init__(self):
+            self.user_prompt = [MockPrompt(notice_line, name="message", source="system"),
+                                MockPrompt(message_line, name="message", source="system")]
+            self.messages = []
+
+    req = Req()
+    _run(rw.rewrite(sid=sid, req=req))
+
+    assert "↑该条消息被贴了" not in req.user_prompt[0].content, "Notice 行不应被标注"
+    assert "↑该条消息被贴了" in req.user_prompt[1].content, "原消息应被标注"

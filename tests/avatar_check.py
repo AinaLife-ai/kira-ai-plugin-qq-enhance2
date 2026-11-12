@@ -288,6 +288,41 @@ print(f"  VLM 调用次数: {n}；描述: {d1!r}")
 check("同一 URL 只调 1 次 VLM", n == 1, n)
 check("两次结果一致且非空", d1 == d2 and bool(d1), (d1, d2))
 
+# avatar_desc_cache_seconds=0 → 关闭缓存，每次都重新识别
+async def e2e_desc_cache_disabled():
+    import core.utils.common_utils as cu
+    calls = {"n": 0}
+
+    async def fake_desc_img(client=None, image=None, prompt=None, lang=None):
+        calls["n"] += 1
+        return "描述"
+
+    orig = cu.desc_img
+    cu.desc_img = fake_desc_img
+    try:
+        class CtxVLM:
+            class provider_mgr:
+                @staticmethod
+                def get_default_vlm():
+                    return object()
+            config = {"locale": {"lang": "zh"}}
+
+        adapter, _q, _c = make_real_adapter()
+        tool = QQProfileTool(ctx=CtxVLM(), adapter=adapter, self_id="100",
+                             avatar_desc_cache_seconds=0)
+        from tools.qq_profile import _AVATAR_DESC_CACHE
+        _AVATAR_DESC_CACHE.clear()
+        url = "https://q1.qlogo.cn/g?b=qq&nk=10001&s=640"
+        await tool._describe_avatar(url)
+        await tool._describe_avatar(url)
+        return calls["n"]
+    finally:
+        cu.desc_img = orig
+
+n0 = run(e2e_desc_cache_disabled())
+print(f"  avatar_desc_cache_seconds=0 时 VLM 调用次数: {n0}")
+check("0 = 关闭缓存，每次都识别", n0 == 2, n0)
+
 print("\n" + "=" * 60)
 print(f"头像功能审计: {len(PASS)} 通过, {len(FAIL)} 失败")
 if FAIL:

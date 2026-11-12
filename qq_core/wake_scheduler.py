@@ -64,6 +64,7 @@ class WakeScheduler:
         profile_like_merge_window_seconds: int = 10,
         wake_quiet_hours: str = "",
         wake_max_per_hour: int = 60,
+        wake_hint: str = "",
         self_id_resolver=None,
     ):
         self.ctx = ctx
@@ -81,6 +82,9 @@ class WakeScheduler:
         self.profile_like_merge_window_seconds = profile_like_merge_window_seconds
         self.wake_quiet_hours = wake_quiet_hours
         self.wake_max_per_hour = wake_max_per_hour
+        # 互动提示（单个配置，空=不加）。只加在"互动类"唤醒上：
+        # 被贴表情（自己/他人）、资料卡被赞；头衔/被踢不加（没什么可互动的）。
+        self.wake_hint = str(wake_hint or "").strip()
 
         # 点赞累加器：sid → {operator: {count, first_ts, last_ts}}
         self._like_accumulator: dict[str, dict[str, dict]] = {}
@@ -206,7 +210,31 @@ class WakeScheduler:
 
         return False
 
-    async def trigger_others_emoji_like(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
+    def _compose_text(self, fact: str, *, with_fact: bool = True) -> str:
+        """拼唤醒正文：事实（可选）+ 互动提示（可选）。
+
+        Args:
+            fact: 事实描述，如 `[System 用户X 给你贴了爱心 (ID: 66)]`。
+            with_fact: 是否带上事实。False 用于"被贴消息和本次唤醒会同批送达"
+                的场景 —— 此时那条消息自己带着 `↑该条消息被贴了…` 标注，
+                再复述一遍就是重复。
+
+        Returns:
+            唤醒正文。极端情况（不带事实且没配提示）会回退为事实，
+            因为空正文的 notice 会被 S/Z 的空通知过滤直接丢弃。
+        """
+        parts = []
+        if with_fact:
+            parts.append(fact)
+        if self.wake_hint:
+            parts.append(f"[互动提示] {self.wake_hint}")
+        if not parts:
+            return fact
+        return "\n".join(parts)
+
+    async def trigger_others_emoji_like(self, event: QQEvent, message_author: str,
+                                        message_author_name: str, msg_excerpt: str,
+                                        *, in_buffer: bool = False):
         """触发"他人消息被贴表情"唤醒（默认冷却 20 秒）。
 
         Args:
@@ -214,6 +242,10 @@ class WakeScheduler:
             message_author: 被贴消息作者 QQ。
             message_author_name: 被贴消息作者昵称。
             msg_excerpt: 被贴消息摘要。
+            in_buffer: 被贴的那条消息是否还在会话缓冲区里。
+                True = 它会被同批次一起送给 LLM（自己带 `↑` 标注）→ 不再复述事实，
+                只留互动提示（若没配提示则仍用事实兜底，否则唤醒无正文）。
+                False = 消息已经发过/被丢弃 → 事实是唯一信息来源，照常写。
         """
         now = time.time()
         self._others_emoji_wake_ts[event.sid] = now
@@ -228,7 +260,12 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
-        await self._trigger_text(event.sid, text, "others_emoji_like",
+        # in_buffer 时不复述事实（那条消息自己带着 ↑ 标注，会同批送达）
+        body = self._compose_text(text, with_fact=not in_buffer)
+        if in_buffer and self.wake_hint:
+            logger.debug(
+                f"[QQ增强2] 被贴消息在缓冲区内，省略事实复述: sid={event.sid}")
+        await self._trigger_text(event.sid, body, "others_emoji_like",
                                 actor_qq=event.actor, actor_name=event.actor_name)
 
     async def _is_self_message(self, event: QQEvent) -> bool:
@@ -399,6 +436,7 @@ class WakeScheduler:
         from .fmt import fmt_user
         # 构造唤醒文本（带昵称，对齐框架 用户{QQ}({昵称}) 格式）
         text = f"[System {fmt_user(operator, actor_name)}赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
+        text = self._compose_text(text)
         await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator,
                                 actor_name=actor_name)
 
@@ -420,6 +458,8 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
+        # 自己的消息是 assistant 角色，改写器不标注 → 事实必须保留，再补提示
+        text = self._compose_text(text)
         await self._trigger_text(event.sid, text, "emoji_like_self",
                                 actor_qq=event.actor, actor_name=event.actor_name)
 
@@ -445,35 +485,61 @@ class WakeScheduler:
         await self._trigger_text(event.sid, text, "kicked_self",
                                 actor_qq=event.actor, actor_name=event.actor_name)
 
-    def _get_supported_elements(self, adapter_info) -> list[str]:
-        """获取适配器支持的消息元素类型（用于构造唤醒事件）。
+    def _get_supported_elements(self, adapter_info, ctx=None) -> list[str]:
+        """获取适配器支持的消息元素类型（唤醒事件用）。
+
+        唤醒事件需要正确的 `supported_elements`，否则 assemble 阶段不会注册
+        对应 tag（text/img/at/reply/emoji…），LLM 输出 `<img>`、`<at>` 会被丢掉。
+
+        入参可能是两种东西：
+          · AdapterInfo（有 supported_elements 字段）
+          · 适配器实例（`ctx.adapter_mgr.get_adapter(name)` 的返回，实际就是它）
 
         Args:
-            adapter_info: 适配器信息对象。
+            adapter_info: AdapterInfo 或适配器实例。
+            ctx: PluginContext（用于按名字取适配器实例）。
 
         Returns:
-            支持的标签列表；无法确定时回退 ["text"]（至少保证文本可解析）。
+            元素类型列表；都取不到时回退 ["text"]（保证至少能发文本）。
         """
-        # 尝试从适配器实例的元数据获取
+        # 1. 直接字段
         try:
-            adapter = self.ctx.adapter_mgr.get_adapter(adapter_info.name)
-            if adapter is not None:
+            els = getattr(adapter_info, "supported_elements", None)
+            if isinstance(els, (list, tuple)) and els:
+                return list(els)
+        except Exception:
+            pass
+
+        # 2. 定位适配器实例
+        adapter = None
+        try:
+            if hasattr(adapter_info, "message_types") or hasattr(adapter_info, "get_capability"):
+                adapter = adapter_info
+            else:
+                name = (getattr(adapter_info, "name", None)
+                        or getattr(getattr(adapter_info, "info", None), "name", None))
+                if ctx is not None and name:
+                    adapter = ctx.adapter_mgr.get_adapter(name)
+        except Exception:
+            adapter = None
+
+        if adapter is not None:
+            # 2a. 元数据对象（部分实现）
+            try:
                 meta = getattr(adapter, "_metadata", None)
                 elems = getattr(meta, "supported_elements", None)
                 if isinstance(elems, (list, tuple)) and elems:
                     return list(elems)
-                # 部分实现把 metadata 暴露为方法
-                getter = getattr(adapter, "get_message_metadata", None)
-                if callable(getter):
-                    meta2 = getter()
-                    if asyncio.iscoroutine(meta2):
-                        meta2 = asyncio.get_event_loop().run_until_complete(meta2)
-                    elems2 = getattr(meta2, "supported_elements", None)
-                    if isinstance(elems2, (list, tuple)) and elems2:
-                        return list(elems2)
-        except Exception:
-            pass
-        # 回退：至少支持文本
+            except Exception:
+                pass
+            # 2b. IMAdapter.message_types（框架 3.1/3.2 都有；deprecated 但可靠）
+            try:
+                mt = getattr(adapter, "message_types", None)
+                if isinstance(mt, (list, tuple)) and mt:
+                    return list(mt)
+            except Exception:
+                pass
+
         return ["text"]
 
     async def _trigger_text(self, sid: str, text: str, event_type: str,
@@ -696,46 +762,6 @@ class WakeScheduler:
             except Exception:
                 pass
         return self.self_id
-
-    def _get_supported_elements(self, adapter_info, ctx=None) -> list[str]:
-        """获取适配器支持的元素类型列表。
-
-        唤醒事件需要正确的 supported_elements，否则 assemble 阶段不会注册
-        text tag，导致 LLM 输出的 <msg><text> 无法解析。
-
-        查找顺序：
-        1. adapter_info.supported_elements（若存在）
-        2. 通过 ctx.adapter_mgr.get_adapter(name).message_types（QQ 适配器有）
-        3. 回退 ["text"]（唤醒文本一定有 text，这是最小可用集）
-
-        Args:
-            adapter_info: 适配器信息对象。
-            ctx: PluginContext（用于查适配器实例）。
-
-        Returns:
-            元素类型列表。
-        """
-        # 1. 直接字段
-        try:
-            els = getattr(adapter_info, "supported_elements", None)
-            if els:
-                return list(els)
-        except Exception:
-            pass
-
-        # 2. 从适配器实例取（IMAdapter.message_types）
-        try:
-            if ctx is not None:
-                name = getattr(adapter_info, "name", None) or getattr(adapter_info, "adapter_id", None)
-                adapter = ctx.adapter_mgr.get_adapter(name) if name else None
-                mt = getattr(adapter, "message_types", None) if adapter else None
-                if mt:
-                    return list(mt)
-        except Exception:
-            pass
-
-        # 3. 回退：唤醒文本只用 text
-        return ["text"]
 
     async def terminate(self):
         """清理：取消所有待结算的点赞定时器（防任务泄漏）。
