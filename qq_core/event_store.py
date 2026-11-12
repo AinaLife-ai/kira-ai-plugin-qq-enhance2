@@ -119,16 +119,31 @@ class EventStore:
             self._dirty.add(sid)
 
     async def _persist_loop(self):
-        """定期落盘（每 30s 写一次所有 dirty sid）。
+        """定期落盘 + 清理过期事件。
 
-        注意：不能只在 dirty ≥ 50 时才写——那样少量会话的变化会永远不落盘
-        （重启后丢失）。dirty 非空即写，30s 节流足够（小文件、写入量低）。
+        两件事：
+        1. 落盘：dirty 非空即写（30s 节流）。不能只在 dirty ≥ 50 时才写——
+           那样少量会话的变化会永远不落盘（重启后丢失）。
+        2. 清理：按 ttl_seconds 清掉过期事件，避免内存里堆积超期数据
+           （渲染时虽按窗口过滤，但不过期数据会一直占内存直到 LRU 淘汰）。
         """
         while True:
             try:
                 await asyncio.sleep(30)
                 if self._dirty:
                     await self._persist_all()
+                # 按 TTL 清理（每轮都做，开销 O(总事件数)，事件数上限受控）
+                cutoff = time.time() - self.ttl_seconds
+                async with self._lock:
+                    for sid in list(self._store.keys()):
+                        lst = self._store[sid]
+                        remain = [e for e in lst if e.ts >= cutoff]
+                        if len(remain) != len(lst):
+                            if remain:
+                                self._store[sid] = remain
+                            else:
+                                self._store.pop(sid, None)
+                            self._dirty.add(sid)
             except asyncio.CancelledError:
                 break
             except Exception:

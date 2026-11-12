@@ -335,6 +335,37 @@ class WakeScheduler:
         text = f"[System 你被移出群聊]"
         await self._trigger_text(event.sid, text, "kicked_self", actor_qq=event.actor)
 
+    def _get_supported_elements(self, adapter_info) -> list[str]:
+        """获取适配器支持的消息元素类型（用于构造唤醒事件）。
+
+        Args:
+            adapter_info: 适配器信息对象。
+
+        Returns:
+            支持的标签列表；无法确定时回退 ["text"]（至少保证文本可解析）。
+        """
+        # 尝试从适配器实例的元数据获取
+        try:
+            adapter = self.ctx.adapter_mgr.get_adapter(adapter_info.name)
+            if adapter is not None:
+                meta = getattr(adapter, "_metadata", None)
+                elems = getattr(meta, "supported_elements", None)
+                if isinstance(elems, (list, tuple)) and elems:
+                    return list(elems)
+                # 部分实现把 metadata 暴露为方法
+                getter = getattr(adapter, "get_message_metadata", None)
+                if callable(getter):
+                    meta2 = getter()
+                    if asyncio.iscoroutine(meta2):
+                        meta2 = asyncio.get_event_loop().run_until_complete(meta2)
+                    elems2 = getattr(meta2, "supported_elements", None)
+                    if isinstance(elems2, (list, tuple)) and elems2:
+                        return list(elems2)
+        except Exception:
+            pass
+        # 回退：至少支持文本
+        return ["text"]
+
     async def _trigger_text(self, sid: str, text: str, event_type: str, actor_qq: str = ""):
         """构造 KiraMessageEvent 并 trigger（进入会话 buffer）。
 
@@ -381,7 +412,10 @@ class WakeScheduler:
 
         event = KiraMessageEvent(
             adapter=adapter_info.info,
-            supported_elements=[],
+            # 必须传真实支持的标签，否则 assemble 阶段不会注册 text tag，
+            # 导致 LLM 输出 <msg><text> 时无法解析。
+            # 从适配器元数据取（拿不到时回退为 ["text"]）。
+            supported_elements=self._get_supported_elements(adapter_info, self.ctx),
             message=KiraIMMessage(
                 timestamp=int(time.time()),
                 sender=user,
@@ -503,6 +537,47 @@ class WakeScheduler:
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _get_supported_elements(adapter_info, ctx=None) -> list[str]:
+        """获取适配器支持的元素类型列表。
+
+        唤醒事件需要正确的 supported_elements，否则 assemble 阶段不会注册
+        text tag，导致 LLM 输出的 <msg><text> 无法解析。
+
+        查找顺序：
+        1. adapter_info.supported_elements（若存在）
+        2. 通过 ctx.adapter_mgr.get_adapter(name).message_types（QQ 适配器有）
+        3. 回退 ["text"]（唤醒文本一定有 text，这是最小可用集）
+
+        Args:
+            adapter_info: 适配器信息对象。
+            ctx: PluginContext（用于查适配器实例）。
+
+        Returns:
+            元素类型列表。
+        """
+        # 1. 直接字段
+        try:
+            els = getattr(adapter_info, "supported_elements", None)
+            if els:
+                return list(els)
+        except Exception:
+            pass
+
+        # 2. 从适配器实例取（IMAdapter.message_types）
+        try:
+            if ctx is not None:
+                name = getattr(adapter_info, "name", None) or getattr(adapter_info, "adapter_id", None)
+                adapter = ctx.adapter_mgr.get_adapter(name) if name else None
+                mt = getattr(adapter, "message_types", None) if adapter else None
+                if mt:
+                    return list(mt)
+        except Exception:
+            pass
+
+        # 3. 回退：唤醒文本只用 text
+        return ["text"]
 
     async def terminate(self):
         """清理：取消所有待结算的点赞定时器（防任务泄漏）。

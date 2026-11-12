@@ -60,7 +60,9 @@ class MessageLocator:
             self._cache[message_id] = {
                 "sender": sender,
                 "sender_name": sender_name,
-                "text": text[:200] if text else "",
+                # 保留 500 字符：撤回标注需要用前 50 字做匹配键，
+                # 但长消息（如引用）也可能被撤回，500 足够覆盖常见场景。
+                "text": text[:500] if text else "",
                 "ts": time.time(),
                 "is_self": is_self,
             }
@@ -124,7 +126,7 @@ class MessageLocator:
             result = {
                 "sender": sender,
                 "sender_name": sender_name,
-                "text": text[:200],
+                "text": text[:500],
                 "ts": int(data.get("time") or time.time()),
                 "is_self": is_self,
             }

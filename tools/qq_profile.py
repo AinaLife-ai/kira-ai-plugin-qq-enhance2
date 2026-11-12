@@ -181,7 +181,11 @@ class QQProfileTool(BaseTool):
             # 性别：不同协议端可能返回 int 或 str（"1"/"male"），统一归一化
             sex_map = {0: "未知", 1: "男", 2: "女"}
             sex_str = self._normalize_sex(data.get("sex"))
+            # 头像 URL：优先取 get_stranger_info 的 headUrl（三家都支持），
+            # 缺失时兜底试 get_qq_avatar（仅 LLOneBot 支持）
             head_url = data.get("headUrl") or data.get("avatar") or ""
+            if not head_url:
+                head_url = await self._fetch_avatar_url(qq)
 
             result = f"用户 {qq} 的资料：\n"
             result += f"  昵称：{nickname or '（未提供）'}\n"
@@ -237,6 +241,27 @@ class QQProfileTool(BaseTool):
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
             return ""
+
+    async def _fetch_avatar_url(self, qq: str) -> str:
+        """兜底获取头像 URL（get_qq_avatar 仅 LLOneBot 支持）。
+
+        Args:
+            qq: QQ 号。
+
+        Returns:
+            头像 URL；不支持或无返回时为空串。
+        """
+        try:
+            resp = await self.adapter.bot.send_action("get_qq_avatar", {"user_id": qq})
+            if isinstance(resp, dict) and resp.get("status") == "ok":
+                data = resp.get("data")
+                if isinstance(data, dict):
+                    return str(data.get("url") or "")
+                if isinstance(data, str):
+                    return data
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def _normalize_sex(val) -> str:

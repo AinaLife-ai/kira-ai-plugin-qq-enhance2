@@ -29,23 +29,46 @@ def _fmt_user(qq: str, name: str) -> str:
 
 
 def _time_prefix(events: list[QQEvent]) -> str:
-    """时间前缀：[群动态·刚刚(≤60s)] / [群动态·过去N分钟] / [群动态·今天] / [群动态·昨天 HH:MM 起]。"""
+    """时间前缀（按日历日期判断，不是按 age 时长）。
+
+    格式：
+      [群动态·刚刚]           最新事件 ≤ 60 秒
+      [群动态·过去N分钟]      最新事件 ≤ 60 分钟
+      [群动态·今天 HH:MM 起]  最新事件在今天
+      [群动态·昨天 HH:MM 起]  最新事件在昨天
+      [群动态·MM-DD HH:MM 起] 更早
+
+    注意：用"最新事件"而非"最旧事件"判断，因为摘要描述的是"刚刚发生了什么"，
+    用最新事件的时间更符合直觉。
+    """
     if not events:
         return ""
-    now = time.time()
-    oldest = min(ev.ts for ev in events)
-    age = now - oldest
-    if age <= 60:
-        return "[群动态·刚刚]"
-    elif age <= 3600:
-        mins = int(age // 60)
-        return f"[群动态·过去{mins}分钟]"
-    elif age <= 86400:
-        return "[群动态·今天]"
-    else:
-        from datetime import datetime
-        dt = datetime.fromtimestamp(oldest)
-        return f"[群动态·{dt.strftime('%m-%d %H:%M')} 起]"
+    try:
+        from datetime import datetime, timedelta
+        now = time.time()
+        newest = max(ev.ts for ev in events)
+        age = now - newest
+
+        if age <= 60:
+            return "[群动态·刚刚]"
+        if age <= 3600:
+            return f"[群动态·过去{int(age // 60)}分钟]"
+
+        # 按日历日期判断（不是按 age 时长，避免跨天误判）
+        dt = datetime.fromtimestamp(newest)
+        today = datetime.fromtimestamp(now).date()
+        target_date = dt.date()
+        delta_days = (today - target_date).days
+
+        hm = dt.strftime("%H:%M")
+        if delta_days == 0:
+            return f"[群动态·今天 {hm} 起]"
+        elif delta_days == 1:
+            return f"[群动态·昨天 {hm} 起]"
+        else:
+            return f"[群动态·{dt.strftime('%m-%d %H:%M')} 起]"
+    except Exception:
+        return "[群动态]"
 
 
 def render_env_summary(
@@ -165,15 +188,39 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         # 合并：按 (actor, target_message_author) 归并
         # 注意：target_message_author 需 message_locator 反查（此处 events 已带 target/target_name）
         from .emoji_display import format_emoji_list
-        parts = []
+        groups: dict[tuple[str, str], dict] = {}
         for ev in events:
-            emoji_ids = ev.extra.get("emoji_ids", [])
-            count = ev.extra.get("count", 1)
-            msg_id = ev.extra.get("message_id", "")
-            emoji_str = format_emoji_list(emoji_ids, count)
-            part = f"{_fmt_user(ev.actor, ev.actor_name)} 给 {_fmt_user(ev.target, ev.target_name)} 的消息贴了 {emoji_str}"
-            if msg_id:
-                part += f"(msg:{msg_id[:8]}...)"
+            key = (ev.actor, ev.target)
+            g = groups.get(key)
+            if g is None:
+                groups[key] = {
+                    "actor_name": ev.actor_name,
+                    "target_name": ev.target_name,
+                    "emoji_ids": list(ev.extra.get("emoji_ids", [])),
+                    "count": ev.extra.get("count", 1),
+                    "message_ids": [ev.extra.get("message_id", "")] if ev.extra.get("message_id") else [],
+                }
+            else:
+                # 合并表情 ID（去重保序）+ 累加次数
+                for e in ev.extra.get("emoji_ids", []):
+                    if e and e not in g["emoji_ids"]:
+                        g["emoji_ids"].append(e)
+                g["count"] += ev.extra.get("count", 1)
+                mid = ev.extra.get("message_id", "")
+                if mid and mid not in g["message_ids"] and len(g["message_ids"]) < 3:
+                    g["message_ids"].append(mid)
+
+        parts = []
+        for (actor, target), g in groups.items():
+            emoji_str = format_emoji_list(g["emoji_ids"], g["count"])
+            part = (
+                f"{_fmt_user(actor, g['actor_name'])} 给 "
+                f"{_fmt_user(target, g['target_name'])} 的消息贴了 {emoji_str}"
+            )
+            # 完整 message_id（bot 回贴必需，不截断）
+            if g["message_ids"]:
+                ids = ",".join(g["message_ids"])
+                part += f"(消息 {ids})"
             parts.append(part)
         return "；".join(parts)
 
@@ -240,10 +287,25 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         return "；".join(parts)
 
     elif etype == E_RECALL:
-        parts = []
+        # 合并：同一操作者的多次撤回合并为 "X 撤回了 N 条消息"
+        by_actor: dict[str, list[QQEvent]] = {}
         for ev in events:
-            part = f"{_fmt_user(ev.actor, ev.actor_name)} 撤回了一条消息"
-            parts.append(part)
+            key = ev.actor or ev.target or "unknown"
+            by_actor.setdefault(key, []).append(ev)
+
+        parts = []
+        for key, lst in by_actor.items():
+            ev0 = lst[0]
+            who = _fmt_user(ev0.actor, ev0.actor_name)
+            # 区分操作者身份：撤回自己 vs 撤回他人
+            if ev0.actor and ev0.target and ev0.actor != ev0.target:
+                detail = "撤回了他人消息"
+            else:
+                detail = "撤回了一条消息"
+            if len(lst) > 1:
+                parts.append(f"{who} {detail}×{len(lst)}")
+            else:
+                parts.append(f"{who} {detail}")
         return "；".join(parts)
 
     elif etype == E_TITLE:

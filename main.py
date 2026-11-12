@@ -12,13 +12,12 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from core.plugin import BasePlugin, PluginContext, logger, on, Priority, register
+from core.plugin import BasePlugin, PluginContext, logger, on, Priority
 from core.chat.message_utils import KiraMessageBatchEvent, KiraMessageEvent
-from core.chat import MessageChain
 from core.provider import LLMRequest
 from core.prompt_manager import Prompt
 
-from .qq_core.event_normalizer import normalize_notice, QQEvent, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF, E_EMOJI_LIKE_SELF
+from .qq_core.event_normalizer import normalize_notice, E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN, E_PROFILE_LIKE_SELF, E_KICKED_SELF, E_TITLE_SELF
 from .qq_core.event_store import EventStore
 from .qq_core.env_renderer import render_env_summary
 from .qq_core.wake_scheduler import WakeScheduler
@@ -149,7 +148,13 @@ class QQEnhance2Plugin(BasePlugin):
 
     # ==================== 感知层：im_message 收集他人事件 ====================
 
-    @on.im_message(priority=Priority.HIGH)
+    # 优先级选择：用 LOW（-50）而非 HIGH。
+    # 原因：S/Z/anti-harass/QQ增强1 都在 HIGH(50) 或更高，
+    # 同优先级时执行顺序取决于插件加载顺序（不稳定）。
+    # 我们用 LOW 保证在它们之后执行，避免顺序不确定带来的行为差异。
+    # （框架对 notice 事件的 discard/trigger 只设策略不中断，所有 handler 都会跑完，
+    #   所以后执行是安全的。）
+    @on.im_message(priority=Priority.LOW)
     async def on_im_message(self, event: KiraMessageEvent, *_):
         """感知 notice 事件（他人事件 → store；唤醒级事件 → trigger）。"""
         if not self.store or not self.wake_scheduler:
