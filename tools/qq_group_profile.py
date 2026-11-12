@@ -53,6 +53,32 @@ class QQGroupProfileTool(BaseTool):
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
 
+    def _resolve_self_id(self, event=None) -> str:
+        """解析机器人自己的 QQ 号（多级兜底，避免 user_id="" 导致协议端超时）。
+
+        顺序：事件自带 self_id → 注入值（config.bot_pid）→ bot.self_id → config 字段。
+
+        Args:
+            event: 消息批次事件（可选）。
+
+        Returns:
+            QQ 号字符串；取不到时为空串。
+        """
+        candidates = [
+            getattr(event, "self_id", "") if event is not None else "",
+            self.self_id,
+            getattr(getattr(self.adapter, "bot", None), "self_id", ""),
+        ]
+        cfg = getattr(self.adapter, "config", None)
+        if isinstance(cfg, dict):
+            candidates += [cfg.get("bot_pid"), cfg.get("self_id"), cfg.get("bot_uin")]
+        for c in candidates:
+            if c:
+                s = str(c).strip()
+                if s and s != "None":
+                    return s
+        return ""
+
     async def execute(
         self,
         event: KiraMessageBatchEvent,
@@ -85,8 +111,14 @@ class QQGroupProfileTool(BaseTool):
             return "错误：此工具仅在群聊中可用。"
 
         group_id = event.session.session_id
-        target = str(user_id) if user_id else self.self_id
-        is_self = (target == self.self_id) if self.self_id else False
+        cur_self_id = self._resolve_self_id(event)
+        target = str(user_id) if user_id else cur_self_id
+        if not target:
+            return (
+                "查询失败：未指定 QQ 号，且无法确定机器人自己的 QQ 号。\n"
+                "请在 QQ 适配器配置里填写「Bot QQ」(bot_pid)，或显式传入 user_id。"
+            )
+        is_self = (target == cur_self_id) if cur_self_id else False
         # 归一化 file（协议端只认特定前缀，纯 base64 需补 base64://）
         try:
             from qq_core.fmt import normalize_file_uri

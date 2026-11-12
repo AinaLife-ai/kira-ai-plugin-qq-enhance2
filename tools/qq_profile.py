@@ -60,6 +60,91 @@ class QQProfileTool(BaseTool):
         self.avatar_desc_prompt = avatar_desc_prompt or ""
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
 
+    # ==================== 基础取值工具 ====================
+
+    @staticmethod
+    def _pick(data: dict, *keys: str) -> str:
+        """从 dict 里按顺序取第一个非空字符串值。
+
+        Args:
+            data: 协议端返回的 data 字典。
+            *keys: 候选字段名（兼容不同协议端的命名差异）。
+
+        Returns:
+            取到的字符串；都没有时返回空串。
+        """
+        if not isinstance(data, dict):
+            return ""
+        for k in keys:
+            v = data.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return str(v)
+        return ""
+
+    def _resolve_self_id(self, event=None) -> str:
+        """解析机器人自己的 QQ 号（多级兜底）。
+
+        **为什么必须兜底**：`user_id=""` 发给协议端会挂满 10 秒才超时
+        （实机日志：`qq_profile args: {}` → `请求 get_stranger_info 超时`）。
+
+        取值顺序：
+        1. 事件自带的 self_id（框架每条 KiraIMMessage 都填，最可靠）
+        2. 注入的 self_id（适配器 config.bot_pid）
+        3. adapter.bot.self_id（运行时）
+        4. adapter.config["bot_pid"] / ["self_id"]
+
+        Args:
+            event: 消息批次事件（可选）。
+
+        Returns:
+            QQ 号字符串；都取不到时为空串。
+        """
+        candidates = [
+            getattr(event, "self_id", "") if event is not None else "",
+            self.self_id,
+            getattr(getattr(self.adapter, "bot", None), "self_id", ""),
+        ]
+        cfg = getattr(self.adapter, "config", None)
+        if isinstance(cfg, dict):
+            candidates += [cfg.get("bot_pid"), cfg.get("self_id"), cfg.get("bot_uin")]
+        for c in candidates:
+            if c:
+                s = str(c).strip()
+                if s and s != "None":
+                    return s
+        return ""
+
+    async def _api(self, action: str, params: dict, timeout: float = 6.0) -> dict:
+        """调用协议端 action 并返回 data 字典（带独立超时）。
+
+        框架的 send_action 默认 10s 超时；工具内再收紧到 6s，
+        避免一个卡死的接口把整轮工具链拖住。
+
+        Args:
+            action: OneBot action 名。
+            params: 参数。
+            timeout: 超时秒数。
+
+        Returns:
+            `data` 字典（没有则空 dict）。
+
+        Raises:
+            asyncio.TimeoutError: 协议端超时未响应。
+            Exception: 其它协议端错误。
+        """
+        resp = await asyncio.wait_for(
+            self.adapter.bot.send_action(action, params),
+            timeout=timeout,
+        )
+        if isinstance(resp, dict):
+            data = resp.get("data")
+            if isinstance(data, dict):
+                return data
+        return {}
+
+
     async def execute(
         self,
         event: KiraMessageBatchEvent,
@@ -88,12 +173,21 @@ class QQProfileTool(BaseTool):
             return "错误：适配器不可用。"
 
         # 判定读写模式
-        target = str(user_id) if user_id else self.self_id
-        is_self = (target == self.self_id) if self.self_id else False
+        # 关键：不传 user_id 时用**多级兜底**解析 self_id。
+        # 实机日志里 self_id 为空 → user_id="" → 协议端挂 10s 超时。
+        cur_self_id = self._resolve_self_id(event)
+        target = str(user_id) if user_id else cur_self_id
+        if not target:
+            return (
+                "查询失败：未指定 QQ 号，且无法确定机器人自己的 QQ 号。\n"
+                "请在 QQ 适配器配置里填写「Bot QQ」(bot_pid)，"
+                "或显式传入 user_id。"
+            )
+        is_self = (target == cur_self_id) if cur_self_id else False
 
         if not is_self:
             # 查询模式：只查询，忽略修改字段
-            return await self._query_user(target)
+            return await self._query_user(target, is_self=False)
 
         # 读写模式：操作自己
         # 构建修改字段
@@ -111,7 +205,7 @@ class QQProfileTool(BaseTool):
         avatar_file = self._normalize_file_uri(avatar)
         if not update_fields and not avatar_file:
             # 未传修改字段：返回当前资料
-            return await self._query_user(target)
+            return await self._query_user(target, is_self=is_self)
 
         # 执行修改
         # 注意：不同协议端支持的字段不同（如 LLOneBot 的 set_qq_profile 只支持
@@ -156,59 +250,140 @@ class QQProfileTool(BaseTool):
                     results.append(f"头像修改失败（当前协议端可能不支持：{type(e).__name__}）")
 
             if not results:
-                return await self._query_user(target)
+                return await self._query_user(target, is_self=is_self)
             # 返回修改结果 + 最新资料
             summary = "；".join(results)
-            profile = await self._query_user(target)
+            profile = await self._query_user(target, is_self=is_self)
             return f"修改完成（{summary}）。\n{profile}"
         except Exception as e:
             logger.debug(f"[QQ增强2] set_qq_profile 失败: {e}")
             return f"修改失败：{e}"
 
-    async def _query_user(self, qq: str) -> str:
+    async def _query_user(self, qq: str, *, is_self: bool = False) -> str:
         """查询用户资料（含头像读图）。
+
+        字段来源（**实测 NapCat 与文档差异**）：
+          · 昵称 / 性别      ← get_stranger_info 的 nickname / sex
+          · 个性签名         ← get_stranger_info 的 **long_nick**（NapCat 文档字段名），
+                              兼容 longNick / longnick / sign / personal_note
+                              ★ 只读 sign 会永远拿不到 → 实机表现"（未提供）"
+          · 头像             ← get_stranger_info **不返回任何头像字段**（NapCat 实测），
+                              回退 ① get_qq_avatar（LLOneBot）
+                                   ② 腾讯头像 CDN（q1.qlogo.cn，按 QQ 号直出，永久可用）
+          · 自己             ← get_login_info（永不超时）兜底昵称，再叠加 get_stranger_info
+
+        Args:
+            qq: QQ 号。
+            is_self: 是否查询自己（决定是否走 get_login_info 兜底）。
+
+        Returns:
+            资料文本。
+        """
+        qq = str(qq or "").strip()
+        if not qq:
+            return ("查询失败：QQ 号为空。（如果这是「查询自己」的调用，"
+                    "说明适配器配置的 bot_pid 为空，请在适配器设置里填写 Bot QQ。）")
+
+        data: dict = {}
+        timed_out = False
+        err_note = ""
+
+        # 查自己：**先**拿 get_login_info（最快最稳，永不超时），
+        # 这样即使后面的 get_stranger_info 卡住，也已经有昵称可展示。
+        login: dict = {}
+        if is_self:
+            try:
+                login = await self._api("get_login_info", {}, timeout=4.0)
+            except Exception as e:
+                logger.debug(f"[QQ增强2] get_login_info 失败: {e}")
+
+        try:
+            # no_cache 是 NapCat 文档里的 required 字段，之前没传
+            data = await self._api(
+                "get_stranger_info",
+                {"user_id": qq, "no_cache": False},
+                timeout=6.0,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+        except Exception as e:
+            err_note = f"{type(e).__name__}: {e}"
+            logger.debug(f"[QQ增强2] get_stranger_info 失败: {qq}: {e}")
+
+        nickname = (self._pick(data, "nickname", "nick")
+                    or self._pick(login, "nickname", "nick"))
+        personal_note = self._pick(
+            data, "long_nick", "longNick", "longnick",
+            "sign", "personal_note", "personalNote",
+        )
+        sex_str = self._normalize_sex(data.get("sex"))
+
+        # 头像：API 字段 → get_qq_avatar → 腾讯 CDN（按 QQ 号直出）
+        head_url = self._pick(
+            data, "headUrl", "head_url", "avatar", "avatarUrl",
+            "avatar_url", "head_img",
+        )
+        if not head_url:
+            # 腾讯头像 CDN **优先**：按 QQ 号直出、零 API 调用、零超时风险。
+            # get_qq_avatar 是 LLOneBot 扩展接口，NapCat 不支持（要等 2.5s 超时），
+            # 只在 QQ 号不是纯数字（CDN 拼不出来）时才试。
+            head_url = self._fallback_avatar_url(qq)
+        if not head_url:
+            head_url = await self._fetch_avatar_url(qq)
+
+        # 完全拿不到任何信息 → 明确报错（区分超时/无权限）
+        if not data and not login and not nickname:
+            if timed_out:
+                return (
+                    f"查询失败：协议端 6 秒内没有响应 get_stranger_info（user_id={qq}）。\n"
+                    "可能原因：① 该协议端未实现此接口 ② WebSocket 断线 ③ 协议端正在重连。"
+                )
+            return (f"查询失败：用户 {qq} 不存在或无权限。"
+                    + (f"（{err_note}）" if err_note else ""))
+
+        result = f"用户 {qq} 的资料：\n"
+        result += f"  昵称：{nickname or '（未提供）'}\n"
+        if personal_note:
+            result += f"  个性签名：{personal_note}\n"
+        elif timed_out:
+            result += "  个性签名：（协议端未响应，暂无法获取）\n"
+        else:
+            result += "  个性签名：（该协议端未提供）\n"
+        result += f"  性别：{sex_str}\n"
+
+        # 头像：读图（VLM 描述），而非只给 URL
+        if head_url:
+            avatar_desc = await self._describe_avatar(head_url)
+            if avatar_desc:
+                result += f"  头像：{avatar_desc}\n"
+            else:
+                result += f"  头像：{head_url}\n"
+        else:
+            result += "  头像：（无法获取）\n"
+
+        if timed_out:
+            result += "  （注：get_stranger_info 超时，以上为可获取到的部分信息）\n"
+        return result
+
+    @staticmethod
+    def _fallback_avatar_url(qq: str) -> str:
+        """用腾讯头像 CDN 按 QQ 号直出头像 URL。
+
+        协议端（NapCat）的 get_stranger_info **不返回头像字段**，
+        但 QQ 头像有公开 CDN：`https://q1.qlogo.cn/g?b=qq&nk={QQ}&s=640`
+        （NapCat 官方 issue #1378 也推荐这个方式，无需任何 API）。
 
         Args:
             qq: QQ 号。
 
         Returns:
-            资料文本。
+            头像 URL；QQ 号非纯数字时返回空串。
         """
-        try:
-            resp = await self.adapter.bot.send_action("get_stranger_info", {"user_id": qq})
-            data = (resp or {}).get("data") or {}
-            if not data:
-                return f"查询失败：用户 {qq} 不存在或无权限。"
+        s = str(qq or "").strip()
+        if not s.isdigit():
+            return ""
+        return f"https://q1.qlogo.cn/g?b=qq&nk={s}&s=640"
 
-            nickname = data.get("nickname") or ""
-            personal_note = data.get("sign") or data.get("personal_note") or ""
-            # 性别：不同协议端可能返回 int 或 str（"1"/"male"），统一归一化
-            sex_map = {0: "未知", 1: "男", 2: "女"}
-            sex_str = self._normalize_sex(data.get("sex"))
-            # 头像 URL：优先取 get_stranger_info 的 headUrl（三家都支持），
-            # 缺失时兜底试 get_qq_avatar（仅 LLOneBot 支持）
-            head_url = data.get("headUrl") or data.get("avatar") or ""
-            if not head_url:
-                head_url = await self._fetch_avatar_url(qq)
-
-            result = f"用户 {qq} 的资料：\n"
-            result += f"  昵称：{nickname or '（未提供）'}\n"
-            result += f"  个性签名：{personal_note or '（未提供）'}\n"
-            result += f"  性别：{sex_str}\n"
-
-            # 头像：读图（VLM 描述），而非只给 URL
-            if head_url:
-                avatar_desc = await self._describe_avatar(head_url)
-                if avatar_desc:
-                    result += f"  头像：{avatar_desc}\n"
-                else:
-                    result += f"  头像：{head_url}\n"
-            else:
-                result += f"  头像：（该协议端未提供）\n"
-            return result
-        except Exception as e:
-            logger.debug(f"[QQ增强2] get_stranger_info 失败: {qq}: {e}")
-            return f"查询失败：{e}"
 
     async def _describe_avatar(self, head_url: str) -> str:
         """下载头像并用 VLM 生成描述（真正"看"头像）。
@@ -269,7 +444,12 @@ class QQProfileTool(BaseTool):
             头像 URL；不支持或无返回时为空串。
         """
         try:
-            resp = await self.adapter.bot.send_action("get_qq_avatar", {"user_id": qq})
+            # 2.5s 超时：get_qq_avatar 是 LLOneBot 扩展接口，NapCat 不支持。
+            # 不支持时协议端可能不回包，用框架默认 10s 会把工具拖死。
+            resp = await asyncio.wait_for(
+                self.adapter.bot.send_action("get_qq_avatar", {"user_id": qq}),
+                timeout=2.5,
+            )
             if isinstance(resp, dict) and resp.get("status") == "ok":
                 data = resp.get("data")
                 if isinstance(data, dict):

@@ -63,6 +63,31 @@ ETYPES = frozenset({
 })
 
 
+def involves_self(ev: QQEvent, self_id: str) -> bool:
+    """判断事件是否与机器人自己有关（自己是发起者或目标）。
+
+    **群动态的语义是"其他用户之间发生了什么"**——凡是涉及 bot 自己的事件
+    （别人戳 bot、bot 禁言别人、bot 的群名片被改、别人给 bot 的消息贴表情……）
+    都不应该进入环境摘要：这些事 bot 自己已经知道（或由专门的唤醒通道推送），
+    再写进动态只会污染上下文，并让模型误以为"群里有人在对我做某事"。
+
+    Args:
+        ev: 归一化后的事件。
+        self_id: 机器人自己的 QQ 号（空串表示未知 → 无法判定，保守放行）。
+
+    Returns:
+        True = 事件涉及自己；False = 纯他人之间的事件。
+    """
+    s = str(self_id or "").strip()
+    if not s:
+        return False
+    if ev.actor and str(ev.actor) == s:
+        return True
+    if ev.target and str(ev.target) == s:
+        return True
+    return False
+
+
 def _s(v: Any) -> str:
     """安全转字符串（None → 空串）。"""
     if v is None:
@@ -153,14 +178,17 @@ def normalize_notice(
     # ---- 戳一戳 ----
     if notice_type == "notify" and sub_type == "poke":
         # 群 poke 或好友 poke
+        #
+        # **只保留"其他用户 → 其他用户"**：
+        #   · 别人戳 bot：框架自己会构造 `[Poke 用户X(昵称)戳了戳你]` 并置
+        #     is_mentioned=True（core/adapter/src/qq/im.py:454-475）→ 唤醒由框架负责；
+        #     我们再记一条群动态就变成"群里有人戳紫小贱"，是重复且无用的信息。
+        #   · bot 戳别人：bot 自己的动作，无信息量。
         if target_id and target_id == self_id:
-            # 自己被戳：框架已构造 [Poke] 文本，我们只记 store（不重复唤醒）
-            et = E_POKE
-        elif user_id and user_id == self_id:
-            # 自己戳别人：不记录（无信息量）
             return None
-        else:
-            et = E_POKE
+        if user_id and user_id == self_id:
+            return None
+        et = E_POKE
         # 戳一戳的动作文案：三家协议端字段不同
         #   · NapCat    : msg["raw_info"][2]["txt"] / [4]["txt"]
         #   · SnowLuma  : msg["action"] / msg["suffix"]
@@ -178,6 +206,11 @@ def normalize_notice(
         # SnowLuma 的 sub_type 为 "add"/"remove"，NapCat/LLOneBot 用 is_add 字段
         is_add = raw.get("is_add", True)
         if is_add is False or sub_type in ("remove", "del", "unlink"):
+            return None
+        # bot 自己给别人贴表情：自己的动作，不记录
+        # （"别人给 bot 的消息贴表情"在 main.py 里按 message_id 反查后走唤醒通道，
+        #   不经过这里；这里只能判断操作者。）
+        if user_id and user_id == self_id:
             return None
         likes = raw.get("likes") or []
         emoji_ids = []
@@ -214,6 +247,9 @@ def normalize_notice(
         # 自己被禁言/解禁 → 归 QQ增强1 处理，我们不重复
         if user_id and user_id == self_id:
             return None
+        # bot 自己禁言/解禁别人 → 自己的动作，不进群动态
+        if operator_id and operator_id == self_id:
+            return None
         return QQEvent(eid=_eid(), etype=et, sid=sid, ts=ts,
                        actor=operator_id, target=user_id,
                        extra={"duration": duration})
@@ -221,14 +257,25 @@ def normalize_notice(
     # ---- 成员减少 ----
     if notice_type == "group_decrease":
         sub = sub_type or ""
-        # kick_me：自己被踢 → 唤醒
-        et = E_KICKED_SELF if sub == "kick_me" else E_MEMBER_DECREASE
-        return QQEvent(eid=_eid(), etype=et, sid=sid, ts=ts,
+        target = user_id
+        # 自己被踢 → 唤醒（QQ增强1 也会处理，两边互不冲突：我们只负责"群动态以外"的提醒）
+        if target and target == self_id and sub in ("kick", "kick_me"):
+            return QQEvent(eid=_eid(), etype=E_KICKED_SELF, sid=sid, ts=ts,
+                           actor=operator_id, target=user_id,
+                           extra={"sub_type": sub})
+        # bot 自己退群 / 被移出（非 kick 语义）→ 自己的动作，不记录
+        if target and target == self_id:
+            return None
+        return QQEvent(eid=_eid(), etype=E_MEMBER_DECREASE, sid=sid, ts=ts,
                        actor=operator_id, target=user_id,
                        extra={"sub_type": sub})
 
     # ---- 撤回 ----
     if notice_type in ("group_recall", "friend_recall"):
+        # bot 自己撤回消息 → 自己的动作，无需标注也无需进群动态
+        # | 说明：撤回改写只处理 role=user 的历史消息，assistant（bot 自己）不会被标注
+        if operator_id and operator_id == self_id:
+            return None
         return QQEvent(eid=_eid(), etype=E_RECALL, sid=sid, ts=ts,
                        actor=operator_id, target=user_id,
                        extra={
@@ -250,12 +297,22 @@ def normalize_notice(
 
     # ---- 头衔授予 ----
     if notice_type == "notify" and sub_type == "title":
+        title = _s(raw.get("title"))
+        # 自己的头衔被改 → 唤醒级事件（此前 E_TITLE_SELF 是死常量，永远不产生，
+        # 导致 wake_title 开关完全失效 + "紫小贱被授予头衔" 混进群动态）
+        if user_id and user_id == self_id:
+            return QQEvent(eid=_eid(), etype=E_TITLE_SELF, sid=sid, ts=ts,
+                           actor=operator_id, target=user_id,
+                           extra={"title": title})
         return QQEvent(eid=_eid(), etype=E_TITLE, sid=sid, ts=ts,
                        target=user_id,
-                       extra={"title": _s(raw.get("title"))})
+                       extra={"title": title})
 
     # ---- 名片更新 ----
     if notice_type == "group_card":
+        # bot 自己的群名片被改 → 与自己相关，不进群动态
+        if user_id and user_id == self_id:
+            return None
         return QQEvent(eid=_eid(), etype=E_CARD, sid=sid, ts=ts,
                        target=user_id,
                        extra={"card_new": _s(raw.get("card_new")),
@@ -263,6 +320,9 @@ def normalize_notice(
 
     # ---- 管理员变动 ----
     if notice_type == "group_admin":
+        # bot 自己的管理员身份变动 → 与自己相关，不进群动态
+        if user_id and user_id == self_id:
+            return None
         return QQEvent(eid=_eid(), etype=E_ADMIN, sid=sid, ts=ts,
                        target=user_id, extra={"sub_type": sub_type})
 

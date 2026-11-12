@@ -171,10 +171,11 @@ def l3_notice_never_trigger_for_others():
     # 不应有 event.trigger() 直接调用（都通过 wake_scheduler）
     if "event.trigger()" in body:
         return False, "on_im_message 不应直接 trigger"
-    # 必须有 store.add 兜底
-    if "self.store.add" not in body:
+    # 必须有入 store 的兜底（第 15 轮起统一走 _add_env_event：
+    # 只有"其他用户之间"的事件才进群动态，涉及 bot 自己的直接跳过）
+    if "self.store.add" not in body and "_add_env_event" not in body:
         return False, "缺少 store.add 兜底（事件会丢失）"
-    return True, "他人事件只入 store，唤醒走 wake_scheduler"
+    return True, "他人事件只入 store（_add_env_event 过滤 bot 自身），唤醒走 wake_scheduler"
 
 
 def l4_no_forbidden_keyword_in_wake_text():

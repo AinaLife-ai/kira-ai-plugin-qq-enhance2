@@ -115,10 +115,13 @@ check("locale: 对象形态", QQProfileTool(ctx=CtxObj())._get_locale_lang() == 
 check("locale: 无 config 回退 zh", QQProfileTool(ctx=CtxNone())._get_locale_lang() == "zh")
 
 
-print("\n=== 5. headUrl 缺失时 get_qq_avatar 兜底 ===")
+print("\n=== 5. headUrl 缺失时的兜底链（CDN 优先 → get_qq_avatar）===")
 check("实现 _fetch_avatar_url", "_fetch_avatar_url" in src)
 check("调用 get_qq_avatar", '"get_qq_avatar"' in src)
-check("headUrl 为空时触发兜底", "if not head_url:" in src and "await self._fetch_avatar_url" in src)
+check("实现腾讯头像 CDN 兜底", "_fallback_avatar_url" in src and "q1.qlogo.cn" in src)
+check("CDN 优先于 get_qq_avatar",
+      src.index("self._fallback_avatar_url(qq)") < src.index("await self._fetch_avatar_url(qq)"),
+      "NapCat 不支持 get_qq_avatar，CDN 必须先试")
 
 
 print("\n=== 6. 头像设置错误处理 ===")

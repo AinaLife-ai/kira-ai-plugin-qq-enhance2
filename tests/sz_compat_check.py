@@ -1,13 +1,17 @@
 """S/Z 聊天插件兼容性验证：我们的唤醒事件会不会污染它们的统计。
 
 关键机制（从 S/Z 源码核实）：
-- Z 的 `_is_system_event()` 判定：`sender.user_id` 以 `system_` 开头 → 系统事件
+- Z 的 `_is_system_event()` 判定：
+    ① sender.user_id 以 `system_` 开头 → 系统事件
+    ② **is_notice=True 且不是 poke → 系统事件**
   → 不参与存在感/评分/骚扰统计
-- 我们的唤醒事件 sender = `system_qq_enhance2`（正是为此设计）
+- 第 15 轮起，我们的唤醒事件按**框架 notice 形态**构造（is_notice=True，
+  sender = 真正的触发者），与戳一戳/禁言/入群完全一致；
+  Z 通过第 ② 条判定为系统事件，统计依然不被污染。
 
 本测试验证：
-1. 我们的唤醒事件 sender 确实以 `system_` 开头
-2. 用 Z 的真实判定逻辑跑一遍，确认返回 True
+1. 唤醒事件是 notice 形态（is_notice=True），sender 是真实触发者
+2. 用 Z 的真实判定逻辑跑一遍，确认返回 True（不污染统计）
 3. 我们的**他人事件**（不 trigger、chain 空）会被框架丢弃，不进 S/Z
 4. 唤醒文本不含 S 的禁言解析模式（防误触发 mute 状态）
 """
@@ -37,17 +41,19 @@ def check(name, cond, detail=""):
         print(f"  FAIL {name}  {detail}")
 
 
-print("\n=== 1. 唤醒事件的 sender 必须是 system_ 前缀 ===")
+print("\n=== 1. 唤醒事件是 notice 形态（与戳一戳/禁言/入群一致）===")
 
 # 从源码确认
 ws_src = (ROOT / "qq_core" / "wake_scheduler.py").read_text(encoding="utf-8")
-m = re.search(r'User\(user_id="([^"]+)",\s*nickname="([^"]+)"\)', ws_src)
-print(f"  找到唤醒事件 sender: {m.groups() if m else 'NOT FOUND'}")
-check("唤醒事件 sender 有 system_ 前缀",
-      bool(m) and m.group(1).startswith("system_"),
-      m.group(1) if m else "未找到")
+check("唤醒事件 is_notice=True", "is_notice=True" in ws_src,
+      "应为 notice，走框架 Notice 格式")
+check("sender 由 _sender_identity 动态决定（真实触发者）",
+      "_sender_identity" in ws_src)
+check("不再伪造 system_qq_enhance2  sender",
+      'user_id="system_qq_enhance2"' not in ws_src,
+      "应删除假用户")
 
-SENDER_ID = m.group(1) if m else ""
+SENDER_ID = "1005"  # 真实触发者（下面第 6 段用实际发布的事件再校验）
 
 print("\n=== 2. 用 Z 的真实判定逻辑验证 ===")
 
@@ -70,9 +76,9 @@ def z_is_system_event(sender_id: str, is_notice: bool, raw: dict = None) -> bool
     return False
 
 
-check(f"Z 判定我们的 sender ({SENDER_ID}) 为系统事件",
-      z_is_system_event(SENDER_ID, is_notice=False), SENDER_ID)
-check("普通用户的 sender 不被判为系统事件",
+check(f"Z 判定我们的唤醒事件为系统事件（sender={SENDER_ID}, is_notice=True）",
+      z_is_system_event(SENDER_ID, is_notice=True), SENDER_ID)
+check("普通用户消息不被判为系统事件",
       not z_is_system_event("1001", is_notice=False))
 
 print("\n=== 3. S 的同类逻辑 ===")
@@ -180,15 +186,19 @@ async def test_wake_event():
     check("唤醒事件已发布", len(published) == 1, str(len(published)))
     if published:
         w = published[0]
-        check("唤醒事件 sender 带 system_ 前缀",
-              str(w.message.sender.user_id).startswith("system_"),
+        check("唤醒事件 sender = 真实触发者（不是假用户）",
+              str(w.message.sender.user_id) == "1005",
               w.message.sender.user_id)
+        check("唤醒事件 is_notice=True（走 Notice 格式）", w.is_notice is True,
+              str(w.is_notice))
         check("唤醒事件 is_mentioned=True", w.is_mentioned is True)
         check("唤醒事件 process_strategy=trigger", w.process_strategy == "trigger",
               w.process_strategy)
         # 用 Z 的规则判定
         check("Z 会把它当系统事件（不污染统计）",
               z_is_system_event(w.message.sender.user_id, w.is_notice))
+        check("唤醒事件 session 正确", w.session.sid == "napcat:gm:188395693",
+              w.session.sid)
 
     await inst.terminate()
 

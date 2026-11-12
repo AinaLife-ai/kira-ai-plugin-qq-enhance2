@@ -71,8 +71,9 @@ def fmt_user(qq: str, name: str = "") -> str:
     """
     qq = str(qq or "").strip()
     name = sanitize_name(name)
-    # 昵称与 QQ 号相同（例如解析器只能拿到号码）→ 不显示重复括号
-    if name and qq and name == qq:
+    # 昵称与 QQ 号相同 / 是"用户{QQ}"这类占位昵称 → 不显示重复括号
+    # （部分协议端/测试替身拿不到昵称时会回 `用户123`，渲染成 `用户123(用户123)` 很丑）
+    if name and qq and (name == qq or name == f"用户{qq}"):
         name = ""
     if qq and name:
         return f"用户{qq}({name})"

@@ -27,16 +27,18 @@ NICKS = {"769690776": "周武", "1593462500": "指尖落黑白", "8888": "管理
 
 
 def fmt_msg(msg) -> str:
-    """复刻框架 core/plugin/builtin_plugins/kira-ai/main.py:_format_user_message 的格式。"""
-    ts = msg.timestamp
-    date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    body = ""
-    for ele in (msg.chain or []):
-        body += getattr(ele, "text", f"[{type(ele).__name__}]")
-    if msg.group:
+    """逐字复刻框架 core/plugin/builtin_plugins/kira-ai/main.py:_format_user_message。"""
+    date_str = datetime.fromtimestamp(msg.timestamp).strftime("%b %d %Y %H:%M %a")
+    body = "".join(getattr(ele, "repr", "") for ele in (msg.chain or []))
+    if msg.group is not None:
+        if msg.is_notice:
+            return (f"[{date_str}] Notice [group_id: {msg.group.group_id}, "
+                    f"user_id: {msg.sender.user_id}] | {body}")
         return (f"[{date_str}] [message_id: {msg.message_id!s}] "
                 f"[group_name: {msg.group.group_name} group_id: {msg.group.group_id} "
                 f"user_nickname: {msg.sender.nickname}, user_id: {msg.sender.user_id}] | {body}")
+    if msg.is_notice:
+        return f"[{date_str}] Notice [user_id: {msg.sender.user_id}] | {body}"
     return (f"[{date_str}] [message_id: {msg.message_id!s}] "
             f"[user_nickname: {msg.sender.nickname}, user_id: {msg.sender.user_id}] | {body}")
 
@@ -106,6 +108,9 @@ async def main():
     for e in await push_notice(adapter, q, make_poke(int(SELF_ID), 769690776, GID, SELF_ID)):
         await inst.on_im_message(e)
     for e in await push_notice(adapter, q, make_poke(769690776, int(SELF_ID), GID, SELF_ID)):
+        await inst.on_im_message(e)
+    # 其他用户 → 其他用户：这条**应该**出现在群动态里（第 15 轮规则）
+    for e in await push_notice(adapter, q, make_poke(1001, 1002, GID, SELF_ID)):
         await inst.on_im_message(e)
     await adapter.im._on_notice_message({
         "post_type": "notice", "notice_type": "group_recall",

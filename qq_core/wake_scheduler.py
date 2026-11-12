@@ -93,6 +93,92 @@ class WakeScheduler:
         # anti-harass 屏蔽名单缓存：{qq: expire_ts}
         self._harass_blocklist: dict[str, float] = {}
         self._last_blocklist_load: float = 0.0
+        # 群名缓存：group_id → group_name
+        # 唤醒事件是自己构造的 KiraMessageEvent，不是协议端下发的 notice，
+        # 框架不会帮我们查群名 —— 不补的话 LLM 每轮看到的是
+        # `[group_name: None group_id: 188395693 ...]`，与真实消息不一致。
+        self._group_names: dict[str, str] = {}
+
+    def remember_group_name(self, group_id: str, group_name: str):
+        """记住群名（从任意一条真实群消息里学到，唤醒时复用）。
+
+        Args:
+            group_id: 群号。
+            group_name: 群名（空/None 时忽略）。
+        """
+        gid = str(group_id or "")
+        name = str(group_name or "").strip()
+        if gid and name and name != "None":
+            self._group_names[gid] = name
+
+    async def _get_group_name(self, adapter_name: str, group_id: str) -> str:
+        """取群名：缓存 → get_group_info（2s 超时）→ 空串。"""
+        gid = str(group_id or "")
+        if not gid:
+            return ""
+        cached = self._group_names.get(gid)
+        if cached:
+            return cached
+        try:
+            adapter, _ = self._resolve_target_adapter(adapter_name)
+            bot = getattr(adapter, "bot", None)
+            if bot is None:
+                return ""
+            resp = await asyncio.wait_for(
+                bot.send_action("get_group_info", {"group_id": gid}), timeout=2.0)
+            name = str(((resp or {}).get("data") or {}).get("group_name") or "")
+            if name:
+                self._group_names[gid] = name
+            return name
+        except Exception:
+            return ""
+
+    def _resolve_target_adapter(self, adapter_name: str):
+        """按适配器名取 (adapter, self_id)。"""
+        try:
+            adapter = self.ctx.adapter_mgr.get_adapter(adapter_name)
+            if adapter is not None:
+                return adapter, self._resolve_self_id(adapter_name)
+        except Exception:
+            pass
+        return self.adapter, self.self_id
+
+    def _self_nickname(self, adapter_name: str = "") -> str:
+        """取 bot 自己的昵称（框架登录时缓存在 bot.self_nickname）。"""
+        adapter, _ = self._resolve_target_adapter(adapter_name)
+        bot = getattr(adapter, "bot", None)
+        for attr in ("self_nickname", "nickname"):
+            nm = getattr(bot, attr, None)
+            if nm:
+                return str(nm).strip()
+        return ""
+
+    def _sender_identity(self, adapter_name: str, actor_qq: str,
+                         actor_name: str = "") -> tuple[str, str]:
+        """确定唤醒事件的 sender（notice 的 user_id 字段）。
+
+        原则：**谁触发的就写谁** —— 与框架 notice 一致
+        （戳一戳：user_id=戳人的人；禁言：user_id=被禁言的人 + 文本说明操作者）。
+        触发者缺失时（例如被踢但协议端没给 operator_id）退化为 bot 自己，
+        绝不再造一个 "系统唤醒 / system_qq_enhance2" 的假用户。
+
+        Args:
+            adapter_name: 适配器名。
+            actor_qq: 触发者 QQ（可能为空）。
+            actor_name: 触发者昵称。
+
+        Returns:
+            (user_id, nickname) 元组。
+        """
+        qq = str(actor_qq or "").strip()
+        name = str(actor_name or "").strip()
+        if qq and qq != "None":
+            return qq, name or f"用户{qq}"
+        self_id = self._resolve_self_id(adapter_name)
+        if self_id:
+            return self_id, self._self_nickname(adapter_name) or f"用户{self_id}"
+        # 实在没有任何身份信息（无适配器/无 self_id）：退回框架的系统 sender
+        return "system", "system"
 
     def should_wake_now(self, event: QQEvent) -> bool:
         """同步版唤醒判定（不递增每小时计数，仅供事件处理时快速判断）。
@@ -142,7 +228,8 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
-        await self._trigger_text(event.sid, text, "others_emoji_like", actor_qq=event.actor)
+        await self._trigger_text(event.sid, text, "others_emoji_like",
+                                actor_qq=event.actor, actor_name=event.actor_name)
 
     async def _is_self_message(self, event: QQEvent) -> bool:
         """判断事件的目标消息是否是 bot 自己的。
@@ -312,7 +399,8 @@ class WakeScheduler:
         from .fmt import fmt_user
         # 构造唤醒文本（带昵称，对齐框架 用户{QQ}({昵称}) 格式）
         text = f"[System {fmt_user(operator, actor_name)}赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
-        await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator)
+        await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator,
+                                actor_name=actor_name)
 
     async def trigger_emoji_like_self(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
         """触发"自己消息被贴表情"唤醒。
@@ -332,14 +420,16 @@ class WakeScheduler:
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
-        await self._trigger_text(event.sid, text, "emoji_like_self", actor_qq=event.actor)
+        await self._trigger_text(event.sid, text, "emoji_like_self",
+                                actor_qq=event.actor, actor_name=event.actor_name)
 
     async def trigger_title_self(self, event: QQEvent):
         """触发"头衔授予"唤醒。"""
         title = event.extra.get("title", "")
         from .fmt import fmt_user
         text = f"[System {fmt_user(event.actor, event.actor_name)}给你授予头衔\"{title}\"]"
-        await self._trigger_text(event.sid, text, "title_self", actor_qq=event.actor)
+        await self._trigger_text(event.sid, text, "title_self",
+                                actor_qq=event.actor, actor_name=event.actor_name)
 
     async def trigger_kicked_self(self, event: QQEvent):
         """触发"被移出群"唤醒。
@@ -352,7 +442,8 @@ class WakeScheduler:
             text = f"[System 你被{fmt_user(event.actor, event.actor_name)}移出群聊]"
         else:
             text = "[System 你被移出群聊]"
-        await self._trigger_text(event.sid, text, "kicked_self", actor_qq=event.actor)
+        await self._trigger_text(event.sid, text, "kicked_self",
+                                actor_qq=event.actor, actor_name=event.actor_name)
 
     def _get_supported_elements(self, adapter_info) -> list[str]:
         """获取适配器支持的消息元素类型（用于构造唤醒事件）。
@@ -385,7 +476,8 @@ class WakeScheduler:
         # 回退：至少支持文本
         return ["text"]
 
-    async def _trigger_text(self, sid: str, text: str, event_type: str, actor_qq: str = ""):
+    async def _trigger_text(self, sid: str, text: str, event_type: str,
+                            actor_qq: str = "", actor_name: str = ""):
         """构造 KiraMessageEvent 并 trigger（进入会话 buffer）。
 
         所有唤醒路径的**唯一收口**，依次检查：
@@ -396,11 +488,26 @@ class WakeScheduler:
         这样任何唤醒（被贴表情/点赞/头衔/被踢/他人贴表情）都受统一约束。
         （原来静默只在 should_wake_now 里查，直接调 trigger_* 的路径绕过了它。）
 
+        **消息形态对齐框架 notice / QQ增强1**：
+        框架的 `_format_user_message` 对 `is_notice=True` 的消息走另一个分支：
+
+            [time] Notice [group_id: 188395693, user_id: 1001] | [System ...]
+
+        而普通消息走：
+
+            [time] [message_id: None] [group_name: ... user_nickname: 系统唤醒,
+             user_id: system_qq_enhance2] | [System ...]
+
+        后者会往上下文里塞 "系统唤醒/system_qq_enhance2" 这种**不存在的用户**，
+        与真实的 notice（戳一戳、禁言、入群）风格不一致，模型也容易把它当成一个人。
+        所以唤醒事件统一按 notice 构造：is_notice=True，sender = 真正的触发者。
+
         Args:
             sid: 会话 ID（格式: adapter:gm:group_id 或 adapter:dm:user_id）。
             text: 唤醒文本。
             event_type: 事件类型（用于日志）。
-            actor_qq: 触发者 QQ（用于 anti-harass 屏蔽名单检查）。
+            actor_qq: 触发者 QQ（用于 anti-harass 屏蔽名单检查 + notice 的 user_id）。
+            actor_name: 触发者昵称（日志/兼容用）。
         """
         # 静默时段（统一收口，避免直接 trigger_* 绕过）
         if self._in_quiet_hours(time.time()):
@@ -432,9 +539,13 @@ class WakeScheduler:
         # 构造 KiraMessageEvent
         group = None
         if session_type == "gm":
-            group = Group(group_id=session_id)
+            # 群名：缓存 → get_group_info；否则 LLM 看到 group_name: None
+            group_name = await self._get_group_name(adapter_name, session_id)
+            group = Group(group_id=session_id, group_name=group_name or session_id)
 
-        user = User(user_id="system_qq_enhance2", nickname="系统唤醒")
+        # 发送者 = 真正的触发者（notice 语义：user_id 就是事件主体）
+        sender_qq, sender_name = self._sender_identity(adapter_name, actor_qq, actor_name)
+        user = User(user_id=sender_qq, nickname=sender_name)
         # 注意：MessageChain 只接受 BaseMessageElement，不能直接传 str
         # （框架 KiraMessageEvent.__post_init__ 会访问 ele.repr，传 str 会崩）
         chain = MessageChain([Text(text)])
@@ -448,15 +559,14 @@ class WakeScheduler:
             message=KiraIMMessage(
                 timestamp=int(time.time()),
                 sender=user,
-                # 对齐框架 notice 的写法（core/adapter/src/qq/im.py:468 用 "None"）：
-                # 唤醒事件是系统注入，不是真实消息，无需长串 ID。
-                # 日志里会显示为 [adapter | None] [group | 系统唤醒]。
+                # 对齐框架 notice 的写法（core/adapter/src/qq/im.py:468 用 "None"）。
                 message_id="None",
                 # 多号部署：用该会话对应账号的 self_id
                 self_id=self._resolve_self_id(adapter_name),
                 group=group,
                 chain=chain,
-                is_notice=False,  # 不是 notice，是系统唤醒
+                # **is_notice=True**：走框架的 Notice 格式（与戳一戳/禁言/入群完全一致）
+                is_notice=True,
                 is_mentioned=True,
             ),
             timestamp=int(time.time()),
