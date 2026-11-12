@@ -28,6 +28,27 @@ _ANGLE_MAP = str.maketrans({"<": "\u2039", ">": "\u203a"})
 _NAME_MAX_LEN = 32
 
 
+# 框架 _format_user_message 的 notice 行：
+#   [Nov 13 2026 01:31 Fri] Notice [group_id: 123, user_id: 456] | [System ...]
+# 通知行是"事件描述"，不是消息本体 —— 改写器（撤回/贴表情）绝不能给它追加
+# "↑该条消息..." 标注，否则会和我们自己的唤醒文案重复两次。
+_NOTICE_LINE_RE = re.compile(r"^\[[^\]\n]*\]\s*Notice\s*\[")
+
+
+def is_notice_line(text: str) -> bool:
+    """判断一段 prompt 文本是否是框架的 notice 系统通知。
+
+    Args:
+        text: 消息文本（可能带前导空白）。
+
+    Returns:
+        True = 这是 Notice 行（事件描述），不是真实消息。
+    """
+    if not text:
+        return False
+    return bool(_NOTICE_LINE_RE.match(text.lstrip()))
+
+
 def sanitize_name(name: str) -> str:
     """净化昵称：防 prompt 注入 / 防破坏单行结构。
 

@@ -121,6 +121,12 @@ class EmojiRewriter:
         def _try_rewrite(text: str) -> tuple[str, set]:
             """在给定文本里匹配所有归档，返回 (新文本, 命中的 message_id)。"""
             hit = set()
+            # Notice 行是"事件描述"，不是被贴的那条消息。
+            # 唤醒文案里会带原文摘要，若不跳过，摘要会命中 → 给通知也追加一遍标注，
+            # 和原消息上的标注重复（用户实机反馈的就是这个）。
+            from .fmt import is_notice_line
+            if is_notice_line(text):
+                return text, hit
             for item in store:
                 original_text = item.get("text", "")
                 if not original_text:

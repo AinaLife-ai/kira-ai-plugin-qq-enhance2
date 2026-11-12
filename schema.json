@@ -84,6 +84,12 @@
         "default": true,
         "hint": "自己被移出群聊时唤醒"
     },
+    "wake_hint": {
+        "name": "唤醒互动提示",
+        "type": "string",
+        "default": "可随手用工具互动（回贴表情、回赞等）；别刷屏，也可以不回应。",
+        "hint": "被贴表情 / 资料卡被赞时，附在唤醒消息里的一句引导，方便模型决定要不要互动。留空=不加提示。"
+    },
     "profile_like_merge_window_seconds": {
         "name": "点赞合并窗口(秒)",
         "type": "int",
@@ -181,12 +187,6 @@
         "default": 20,
         "min": 1,
         "hint": "VLM 描述头像的超时时间；超时则降级为只显示头像 URL（避免卡住工具调用）"
-    },
-    "tools_fetch_emoji_like": {
-        "name": "启用贴表情查询工具",
-        "type": "switch",
-        "default": true,
-        "hint": "启用 fetch_emoji_like 工具"
     },
     "resolve_nickname": {
         "name": "补全事件昵称",

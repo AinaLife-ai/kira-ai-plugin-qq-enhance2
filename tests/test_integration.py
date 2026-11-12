@@ -55,7 +55,7 @@ async def test_plugin_load():
         "perceive_window_seconds", "perceive_max_events", "perceive_max_per_type",
         "env_max_chars", "env_inject_min_interval", "env_ttl_hours",
         "recall_rewrite", "recall_show_content",
-        "tools_profile", "tools_fetch_emoji_like", "debug_log",
+        "tools_profile", "wake_hint", "debug_log",
     }
     actual_keys = set(schema.keys())
     assert expected_keys.issubset(actual_keys), f"缺少配置键: {expected_keys - actual_keys}"
@@ -88,7 +88,8 @@ async def test_tools_defined():
     tool_names = [f.stem for f in tool_files]
     assert "qq_profile" in tool_names
     assert "qq_group_profile" in tool_names
-    assert "fetch_emoji_like" in tool_names
+    # 贴表情查询工具已移除（唤醒通知本身已带"谁贴的 + 表情 ID"）
+    assert "fetch_emoji_like" not in tool_names
 
     # 检查每个工具文件定义了对应类
     for tool_file in tool_files:

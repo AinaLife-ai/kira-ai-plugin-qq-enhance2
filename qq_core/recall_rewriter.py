@@ -69,6 +69,10 @@ class RecallRewriter:
         def _try_rewrite(text: str) -> tuple[str, set]:
             """在给定文本里匹配所有撤回归档，返回 (新文本, 命中的 message_id)。"""
             hit: set[str] = set()
+            # Notice 行不是消息本体，不给它加撤回标注
+            from .fmt import is_notice_line
+            if is_notice_line(text):
+                return text, hit
             for recall_info in recalls:
                 original_text = recall_info.get("text", "")
                 if not original_text:

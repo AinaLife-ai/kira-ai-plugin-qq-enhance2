@@ -5,8 +5,6 @@
 23. set_group_special_title 参数名应为 special_title（不是 title）
 24. set_qq_profile 逐字段尝试（LLOneBot 不支持 sex）
 25. emoji_dict 只在成功加载时标记 _LOADED
-26. fetch_emoji_like 参数 emojiId（驼峰）
-27. fetch_emoji_like 响应 data.result 是状态码不是列表（用 emojiLikesList）
 28. 头像 API 三家均支持 set_qq_avatar（之前误以为无 API）
 """
 
@@ -84,27 +82,6 @@ def test_bug25_emoji_load_flag():
     print("  ✓ Bug25: emoji_dict 只在成功加载时标记")
 
 
-# ============ Bug 26/27: fetch_emoji_like 协议兼容 ============
-
-def test_bug26_emoji_like_params():
-    """请求参数用驼峰 emojiId（NapCat 要求）。"""
-    src = Path(__file__).parent.parent.joinpath("tools", "fetch_emoji_like.py").read_text(encoding="utf-8")
-    assert '"emojiId"' in src, "应传驼峰 emojiId（NapCat 要求）"
-    assert '"emoji_id"' in src, "同时传下划线（LLOneBot 兼容）"
-    print("  ✓ Bug26: fetch_emoji_like 同时传两种参数名")
-
-
-def test_bug27_emoji_like_response():
-    """响应解析用 emojiLikesList，不能把 result 当列表。"""
-    src = Path(__file__).parent.parent.joinpath("tools", "fetch_emoji_like.py").read_text(encoding="utf-8")
-    assert 'data.get("emojiLikesList")' in src, "应读 emojiLikesList"
-    # 不能把 data.result 直接当列表
-    assert 'result_list = data.get("result") or []' not in src, "result 是状态码，不能当列表"
-    # 兼容 result 是列表的旧实现
-    assert 'isinstance(data.get("result"), list)' in src, "应兼容 result 为列表的旧实现"
-    print("  ✓ Bug27: 响应解析用 emojiLikesList（result 是状态码）")
-
-
 # ============ Bug 28: 头像 API ============
 
 def test_bug28_avatar_api():
@@ -142,8 +119,6 @@ if __name__ == "__main__":
     test_bug23_special_title_param()
     test_bug24_field_by_field()
     test_bug25_emoji_load_flag()
-    test_bug26_emoji_like_params()
-    test_bug27_emoji_like_response()
     test_bug28_avatar_api()
     test_protocol_matrix_documented()
     print("=== 第四轮 8 项回归测试全部通过 ===")

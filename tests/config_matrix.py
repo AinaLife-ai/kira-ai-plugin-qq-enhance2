@@ -415,11 +415,9 @@ async def test_tool_cfg():
     from core.chat import MessageChain
     from core.tag import TagSet
 
-    async def tool_names(profile: bool, emoji: bool):
+    async def tool_names(profile: bool):
         adapter, q, _ = make_real_adapter(self_id=SELF_ID)
-        inst, _ = await build_plugin(adapter, {
-            "tools_profile": profile, "tools_fetch_emoji_like": emoji,
-        })
+        inst, _ = await build_plugin(adapter, {"tools_profile": profile})
         batch = KiraMessageBatchEvent(
             supported_elements=["text"], timestamp=1, adapter=adapter.info,
             session=Session(adapter_name="napcat", session_type="gm", session_id=str(GID)),
@@ -432,9 +430,9 @@ async def test_tool_cfg():
         await inst.terminate()
         return names
 
-    n_on = await tool_names(True, True)
-    n_off = await tool_names(False, False)
-    check(f"tools 全开：{n_on}", len(n_on) == 3, str(n_on))
+    n_on = await tool_names(True)
+    n_off = await tool_names(False)
+    check(f"tools 全开：{n_on}", len(n_on) == 2, str(n_on))
     check(f"tools 全关：{n_off}", len(n_off) == 0, str(n_off))
 
 

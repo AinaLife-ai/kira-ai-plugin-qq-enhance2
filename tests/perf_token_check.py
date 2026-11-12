@@ -97,11 +97,10 @@ async def main():
     print("=" * 70)
     from tools.qq_profile import QQProfileTool
     from tools.qq_group_profile import QQGroupProfileTool
-    from tools.fetch_emoji_like import FetchEmojiLikeTool
     import json
 
     total = 0
-    for cls in (QQProfileTool, QQGroupProfileTool, FetchEmojiLikeTool):
+    for cls in (QQProfileTool, QQGroupProfileTool):
         payload = json.dumps(cls.get_schema(), ensure_ascii=False)
         total += len(payload)
         print(f"  {cls.name:18s} {len(payload):4d} 字符 ≈ {est_tokens(payload):5.0f} tokens")

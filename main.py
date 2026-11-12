@@ -4,7 +4,7 @@
 1. 感知层：im_message(LOW) 收集他人事件 → event_store；llm_request(LOW) 注入环境摘要。
 2. 唤醒层：唤醒级事件 → wake_scheduler.trigger() → 进入会话 buffer（批次合并）。
 3. 撤回/贴表情改写：llm_request 阶段在原文后追加标注。
-4. 工具层：qq_profile / qq_group_profile / fetch_emoji_like。
+4. 工具层：qq_profile / qq_group_profile。
 
 优先级说明：
 - im_message 用 LOW(-50)：在 S/Z/anti-harass/QQ增强1（HIGH 及以上）之后执行，
@@ -32,7 +32,6 @@ from .qq_core.emoji_rewriter import EmojiRewriter
 from .qq_core.name_resolver import NameResolver
 from .tools.qq_profile import QQProfileTool
 from .tools.qq_group_profile import QQGroupProfileTool
-from .tools.fetch_emoji_like import FetchEmojiLikeTool
 
 # 数值配置安全转换（用户手改配置 / WebUI 存成字符串时不崩）
 from .qq_core.fmt import safe_int as _safe_int, safe_float as _safe_float
@@ -81,10 +80,14 @@ class QQEnhance2Plugin(BasePlugin):
         self.avatar_describe = self.plugin_cfg.get("avatar_describe", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
-        self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
         self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
         self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
+        # 默认值与 schema.json 保持一致（框架会注入 schema 默认值，这里只是兜底）
+        self.wake_hint = self.plugin_cfg.get(
+            "wake_hint",
+            "可随手用工具互动（回贴表情、回赞等）；别刷屏，也可以不回应。",
+        ) or ""
         self.poke_action_text = self.plugin_cfg.get("poke_action_text", False)
         self.debug_log = self.plugin_cfg.get("debug_log", False)
 
@@ -165,6 +168,7 @@ class QQEnhance2Plugin(BasePlugin):
             profile_like_merge_window_seconds=self.profile_like_merge_window_seconds,
             wake_quiet_hours=self.wake_quiet_hours,
             wake_max_per_hour=self.wake_max_per_hour,
+            wake_hint=self.wake_hint,
             self_id_resolver=self._resolve_self_id,
         )
 
@@ -394,6 +398,34 @@ class QQEnhance2Plugin(BasePlugin):
             self_id 字符串；找不到时回退默认。
         """
         return self._resolve_adapter(adapter_name)[1]
+
+    def _message_in_buffer(self, sid: str, message_id: str) -> bool:
+        """判断某条消息是否还在会话缓冲区里（= 会和本次唤醒同一批送给 LLM）。
+
+        只读 `SessionBuffer.buffer` 的列表，**不加锁、不 await**：
+        检查长度很小（前文上限一般 5 条），不会阻塞事件循环；
+        列表快照用 list() 复制，避免并发修改导致的迭代异常。
+
+        Args:
+            sid: 会话 ID。
+            message_id: 消息 ID（空=直接 False）。
+
+        Returns:
+            True = 还在缓冲区。
+        """
+        mid = str(message_id or "")
+        if not mid:
+            return False
+        try:
+            buf = self.ctx.get_buffer(sid)
+            events = list(getattr(buf, "buffer", None) or [])
+        except Exception:
+            return False
+        for ev in events:
+            msg = getattr(ev, "message", None)
+            if str(getattr(msg, "message_id", "") or "") == mid:
+                return True
+        return False
 
     def _self_id_for_event(self, adapter_name: str, event=None) -> str:
         """取当前事件所属账号的 self_id（三级兜底 + 自学习）。
@@ -641,7 +673,13 @@ class QQEnhance2Plugin(BasePlugin):
                     )
                 # 检查是否需要唤醒（默认冷却 20 秒）
                 if self.wake_scheduler.should_wake_now(qq_event):
-                    await self.wake_scheduler.trigger_others_emoji_like(qq_event, msg_author, msg_author_name, msg_excerpt)
+                    # 被贴的消息是否还在会话缓冲区？
+                    # 在 → 它会被同批次一起送给 LLM（自带 ↑ 标注）→ 唤醒正文不再复述事实
+                    # 不在 → 事实是唯一信息来源，照常写
+                    await self.wake_scheduler.trigger_others_emoji_like(
+                        qq_event, msg_author, msg_author_name, msg_excerpt,
+                        in_buffer=self._message_in_buffer(sid, msg_id),
+                    )
                 elif self.collect_emoji_like_env:
                     # 不唤醒 → 入 store（群动态摘要可见）
                     # 默认关闭：贴表情已由"自己被贴唤醒 / 他人贴表情可唤醒"两路推送覆盖，
@@ -775,6 +813,3 @@ class QQEnhance2Plugin(BasePlugin):
                                            avatar_desc_timeout=self.avatar_desc_timeout,
                                            avatar_describe=self.avatar_describe))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
-
-        if self.tools_fetch_emoji_like:
-            req.tool_set.add(FetchEmojiLikeTool(ctx=self.ctx, adapter=cur_adapter))

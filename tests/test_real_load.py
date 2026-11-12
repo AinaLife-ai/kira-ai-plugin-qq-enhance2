@@ -5,7 +5,7 @@
 验证：
 1. PluginManager.load_plugin_from_dir 加载插件成功。
 2. hook 注册：im_message + llm_request × 2。
-3. 工具注册：qq_profile / qq_group_profile / fetch_emoji_like。
+3. 工具注册：qq_profile / qq_group_profile。
 4. terminate 正常。
 """
 

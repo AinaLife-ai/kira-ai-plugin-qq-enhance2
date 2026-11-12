@@ -1,7 +1,7 @@
 {
     "display_name": "QQ增强2",
     "plugin_id": "kira-ai-plugin-qq-enhance2",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "author": "znq19",
     "description": "增增强数字生命在QQ平台的能力：他人事件感知（戳一戳/贴表情/禁言/撤回/退群）、自己相关事件唤醒（被贴表情/资料卡被赞/头衔授予）、资料卡工具、三家协议端兼容（NapCat/LLOneBot/SnowLuma）",
     "repo": "https://github.com/znq19/kira-ai-plugin-qq-enhance2",
