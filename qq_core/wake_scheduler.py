@@ -463,6 +463,28 @@ class WakeScheduler:
         await self._trigger_text(event.sid, text, "emoji_like_self",
                                 actor_qq=event.actor, actor_name=event.actor_name)
 
+    async def trigger_member_decrease(self, event: QQEvent):
+        """退群/被踢 → notice 唤醒（对齐 QQ增强1 的入群感知）。
+
+        格式与入群同款：`[System 用户X(昵称)退群了]` /
+        `[System 用户X(昵称)被用户Y(昵称)移出群聊]`。
+
+        Args:
+            event: 成员减少事件（E_MEMBER_DECREASE）。
+        """
+        from .fmt import fmt_user
+        sub = str(event.extra.get("sub_type") or "")
+        who = fmt_user(event.target, event.target_name)
+        if sub in ("kick", "kick_me"):
+            if event.actor:
+                text = f"[System {who}被{fmt_user(event.actor, event.actor_name)}移出群聊]"
+            else:
+                text = f"[System {who}被移出群聊]"
+        else:
+            text = f"[System {who}退群了]"
+        await self._trigger_text(event.sid, text, "member_decrease",
+                                actor_qq=event.target, actor_name=event.target_name)
+
     async def trigger_title_self(self, event: QQEvent):
         """触发"头衔授予"唤醒。"""
         title = event.extra.get("title", "")

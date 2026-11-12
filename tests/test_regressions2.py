@@ -154,7 +154,7 @@ def test_bug13_ban_unban_pair():
 
     # 未解除（仍在禁言中）
     t2 = render_env_summary([ban])
-    assert "仍禁言中" in t2 or "禁言时长已过" in t2, f"应显示剩余状态: {t2}"
+    assert "剩约" in t2 or "到期" in t2, f"应显示剩余状态: {t2}"
     print(f"  ✓ Bug13: ban/unban 配对 → {t}")
     print(f"         未解除 → {t2}")
 

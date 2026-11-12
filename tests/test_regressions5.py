@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tests.test_core import _install_framework_stubs  # noqa
 
 from qq_core.event_normalizer import QQEvent, E_POKE, E_RECALL, E_EMOJI_LIKE
-from qq_core.env_renderer import render_env_summary, _time_prefix
+from qq_core.env_renderer import render_env_summary, env_header, fmt_clock
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 
@@ -83,41 +83,34 @@ def test_bug33_full_message_id():
     assert "..." not in t, f"不应截断: {t}"
 
 
-# ============ Bug 34: 时间前缀按日历 ============
+# ============ Bug 34: 时间显示（v1.1.2 改为「绝对时间 + 截至」） ============
 
 def test_bug34_time_prefix_calendar():
-    now = time.time()
-    # 刚刚
-    assert "刚刚" in _time_prefix([QQEvent("1", E_POKE, "s", int(now - 30))])
-    # 过去 N 分钟
-    assert "过去" in _time_prefix([QQEvent("1", E_POKE, "s", int(now - 300))])
-    # 昨天（跨天场景：23 小时前可能是昨天也可能是今天，用 30 小时确保昨天）
-    p = _time_prefix([QQEvent("1", E_POKE, "s", int(now - 30 * 3600))])
-    print(f"  30 小时前: {p}")
-    assert "昨天" in p or "-" in p, f"应显示昨天或日期: {p}"
-    # 更早
-    p2 = _time_prefix([QQEvent("1", E_POKE, "s", int(now - 10 * 86400))])
-    print(f"  10 天前: {p2}")
-    assert "-" in p2, f"应显示日期: {p2}"
+    from datetime import datetime, timedelta, time as dtime
+    today = datetime.now().date()
+    t = datetime.combine(today, dtime(10, 30))
+    now = t.timestamp()
 
+    assert fmt_clock(t.timestamp(), now) == "10:30"
+    assert "截至 10:30" in env_header(now)
+
+    y = t - timedelta(days=1)
+    assert fmt_clock(y.timestamp(), now) == "昨天 10:30"
+    print(f"  昨天: {fmt_clock(y.timestamp(), now)}")
+
+    d2 = t - timedelta(days=2)
+    assert fmt_clock(d2.timestamp(), now) == d2.strftime("%m-%d %H:%M")
+    print(f"  前天: {fmt_clock(d2.timestamp(), now)}")
 
 def test_bug34_crossday():
-    """跨天场景：昨天 23:00 → 今天 01:00（age=2h）不应显示"今天"。"""
+    """跨天：昨天 23:00 相对"今天 01:00"应显示"昨天 23:00"，不能显示成今天。"""
     from datetime import datetime, timedelta, time as dtime
-    # 构造"今天 01:00"
     today = datetime.now().date()
-    t_today_0100 = datetime.combine(today, dtime(1, 0))
-    now_ts = t_today_0100.timestamp()
-    # 如果当前时间早于 01:00 则跳过（无法构造过去）
-    if time.time() < now_ts:
-        print("  (跳过：当前时间早于 01:00)")
-        return
-    # 昨天 23:00
+    now_ts = datetime.combine(today, dtime(1, 0)).timestamp()
     y_2300 = datetime.combine(today - timedelta(days=1), dtime(23, 0))
-    p = _time_prefix([QQEvent("1", E_POKE, "s", int(y_2300.timestamp()))])
-    print(f"  昨天23:00（age≈{int((time.time()-y_2300.timestamp())/3600)}h）: {p}")
-    assert "昨天" in p, f"应按日历显示昨天: {p}"
-
+    got = fmt_clock(y_2300.timestamp(), now_ts)
+    print(f"  昨天23:00: {got}")
+    assert got == "昨天 23:00", got
 
 # ============ Bug 35: 文本缓存长度 ============
 

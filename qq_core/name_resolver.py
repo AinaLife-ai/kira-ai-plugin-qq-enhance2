@@ -6,7 +6,7 @@
 "用户769690776(周武) 戳了戳 用户1593462500"——后一个只有 QQ 号。
 
 设计：
-- 缓存 (adapter_name, group_id, qq) → name，TTL 10 分钟，LRU 1024
+- 缓存 (adapter_name, group_id, qq) → name，TTL 默认 10 秒（可配，0=不缓存），LRU 1024
 - 群聊优先 `get_group_member_info`（一次拿到 nickname/card/role），
   回退 `get_stranger_info`
 - 单次查询 2 秒超时，失败静默（渲染侧会降级为纯 QQ 号）
@@ -35,12 +35,12 @@ class NameResolver:
     """昵称解析器（带缓存 + 并发合并）。
 
     Attributes:
-        ttl: 缓存有效期（秒），默认 600。
+        ttl: 缓存有效期（秒），默认 10；<=0 表示不缓存（仍保留并发合并）。
         max_cache: 缓存上限（LRU），默认 1024。
         timeout: 单次查询超时（秒），默认 2.0。
     """
 
-    def __init__(self, *, ttl: float = 600.0, max_cache: int = 1024,
+    def __init__(self, *, ttl: float = 10.0, max_cache: int = 1024,
                  timeout: float = 2.0):
         self.ttl = ttl
         self.max_cache = max_cache
@@ -58,6 +58,8 @@ class NameResolver:
 
     def _cache_get(self, key: tuple) -> Optional[str]:
         """读缓存（顺带做过期清理 + LRU touch）。"""
+        if self.ttl <= 0:
+            return None
         item = self._cache.get(key)
         if item is None:
             return None
@@ -70,7 +72,7 @@ class NameResolver:
 
     def _cache_set(self, key: tuple, name: str) -> None:
         """写缓存（LRU 淘汰）。"""
-        if not name:
+        if not name or self.ttl <= 0:
             return
         self._cache[key] = (name, time.time())
         self._cache.move_to_end(key)

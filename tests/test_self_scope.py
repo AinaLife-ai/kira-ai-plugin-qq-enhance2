@@ -208,3 +208,124 @@ def test_involves_self_helper():
     assert involves_self(ev, SELF) is True
     assert involves_self(ev, "9999") is False
     assert involves_self(ev, "") is False  # 未知 self_id → 保守放行
+
+
+# ==================== 3. 环境摘要：时间 / 新鲜期 / 禁言状态机 ====================
+
+def _ev(eid, etype, ts, **kw):
+    return QQEvent(eid=eid, etype=etype, sid=SID, ts=ts, **kw)
+
+
+def test_env_fresh_seconds_and_slow_seconds():
+    """env_fresh_seconds / env_slow_seconds：戳一戳 5 分钟、名片 15 分钟。"""
+    from qq_core.env_renderer import filter_env_events
+
+    now = 1_000_000
+    events = [
+        _ev("p1", E_POKE, now - 60, actor="1", actor_name="A", target="2", target_name="B"),
+        _ev("p2", E_POKE, now - 400, actor="3", actor_name="C", target="4", target_name="D"),
+        _ev("c1", E_CARD, now - 400, target="5", target_name="E",
+            extra={"card_new": "新", "card_old": "旧"}),
+    ]
+    kept = filter_env_events(events, now=now, fresh_seconds=300, slow_seconds=900)
+    ids = [e.eid for e in kept]
+    assert "p1" in ids, "5 分钟内的戳一戳应保留"
+    assert "p2" not in ids, "超过 fresh 的戳一戳应消失"
+    assert "c1" in ids, "名片走 slow，15 分钟内应保留"
+
+
+def test_ban_state_machine():
+    """禁言：进行中一直保留；到期后只补报一次（env_show_time 场景下显示"已于"）。"""
+    from qq_core.env_renderer import filter_env_events, render_env_summary
+
+    now = 1_000_000
+    ban = _ev("b1", E_BAN, now - 700, actor="8888", actor_name="管理",
+              target="1005", target_name="小A", extra={"duration": 600})
+    # 600 秒禁言，已经过了 700 秒 → 到期
+    announced = {}
+    kept = filter_env_events([ban], now=now, fresh_seconds=300, slow_seconds=900,
+                             expiry_announced=announced)
+    assert kept, "到期但没补报过 → 应保留一轮"
+    text = render_env_summary(kept, now=now, show_time=True, expiry_announced=announced)
+    assert "到期" in text, text
+    assert announced, "应记录已补报，下一轮不再出现"
+    kept2 = filter_env_events([ban], now=now + 1, fresh_seconds=300, slow_seconds=900,
+                              expiry_announced=announced)
+    assert kept2 == [], "补报过以后应该消失"
+
+    # 仍在禁言中：即使超过 slow 也要保留
+    active = _ev("b2", E_BAN, now - 5000, actor="8888", actor_name="管理",
+                 target="1006", target_name="小B", extra={"duration": 86400})
+    kept3 = filter_env_events([active], now=now, fresh_seconds=300, slow_seconds=900)
+    assert kept3, "还在禁言中的事件必须保留（状态，不是时长）"
+
+
+def test_env_show_time_toggle():
+    """env_show_time：开=每条带时间，关=不带。"""
+    import re
+    from qq_core.env_renderer import render_env_summary
+
+    now = 1_000_000
+    ev = _ev("p1", E_POKE, now - 10, actor="769690776", actor_name="周武",
+             target="3991867505", target_name="紫小贱")
+    on = render_env_summary([ev], now=now, show_time=True)
+    off = render_env_summary([ev], now=now, show_time=False)
+    assert "截至" in on and "用户769690776(周武)" in on, on
+    assert re.search(r"·\s\d{2}:\d{2}\s", on), on
+    assert "用户769690776(周武)" in off, off
+    # 关掉时间后不应出现 "· HH:MM "
+    assert not re.search(r"·\s\d{2}:\d{2}\s", off), off
+
+
+def test_renderer_never_renders_member_decrease():
+    """退群/被踢不再进摘要（改走 notice）。"""
+    from qq_core.env_renderer import render_env_summary
+
+    now = 1_000_000
+    ev = QQEvent(eid="m1", etype=E_MEMBER_DECREASE, sid=SID, ts=now - 10,
+                 target="1009", target_name="退群人", extra={"sub_type": "leave"})
+    text = render_env_summary([ev], now=now)
+    assert text == "", text
+
+
+def test_resolve_cache_seconds():
+    """resolve_cache_seconds：默认 10 秒；0 = 不缓存（仍保留并发合并）。"""
+    import asyncio
+    from qq_core.name_resolver import NameResolver
+
+    class _Bot:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_action(self, action, params, timeout=10.0):
+            self.calls += 1
+            return {"status": "ok", "data": {"nickname": "张三", "card": "老张", "role": "member"}}
+
+    class _A:
+        def __init__(self):
+            self.bot = _Bot()
+
+    async def run(ttl):
+        a = _A()
+        r = NameResolver(ttl=ttl)
+        await r.resolve(a, "napcat", "188395693", "1001")
+        await r.resolve(a, "napcat", "188395693", "1001")
+        return a.bot.calls
+
+    assert asyncio.run(run(10)) == 1, "10 秒内第二次应命中缓存"
+    assert asyncio.run(run(0)) == 2, "0 = 不缓存，每次都查"
+
+
+def test_prune_ban_expiry_bounded():
+    """禁言补报集合不能无限增长（超过 512 条要裁，且丢弃 1 小时前的记录）。"""
+    import time as _t
+    from qq_core.env_renderer import prune_expiry_announced
+
+    now = _t.time()
+    announced = {f"e{i}": now - (i % 7200) for i in range(2000)}
+    kept = prune_expiry_announced(announced, now)
+    assert len(kept) <= 512, len(kept)
+    assert all(v >= now - 3600 for v in kept.values())
+    # 小规模不动
+    small = {"a": now}
+    assert prune_expiry_announced(small, now) is small

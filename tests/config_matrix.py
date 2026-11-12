@@ -118,7 +118,6 @@ async def test_collect_flags():
         # (配置名, 事件构造, 检查 store 里是否有该类型)
         ("collect_poke", lambda: make_poke(1001, 1003, GID, SELF_ID), "poke"),
         ("collect_group_ban", lambda: make_ban(1007, 8888, GID, SELF_ID), "group_ban"),
-        ("collect_member_decrease", lambda: make_decrease(1009, GID, SELF_ID), "member_decrease"),
     ]
     for cfg_name, make_fn, etype in cases:
         # 开启
@@ -403,6 +402,42 @@ async def test_recall_cfg():
 
 asyncio.run(test_recall_cfg())
 
+
+print("\n=== 退群/被踢：colleect 开关 + 唤醒开关 ===")
+
+async def test_member_decrease():
+    # collect_member_decrease 关 → 连唤醒都不该有
+    adapter, q, _ = make_real_adapter(self_id=SELF_ID)
+    inst, pub = await build_plugin(adapter, {"collect_member_decrease": False})
+    for e in await push_notice(adapter, q, make_decrease(1009, GID, SELF_ID)):
+        await inst.on_im_message(e)
+    check("collect 关 → 不唤醒", len(pub) == 0, str(len(pub)))
+    await inst.terminate()
+
+    # collect 开 + wake_member_decrease 开 → notice 唤醒（不进摘要）
+    adapter, q, _ = make_real_adapter(self_id=SELF_ID)
+    inst, pub = await build_plugin(adapter, {"collect_member_decrease": True,
+                                             "wake_member_decrease": True})
+    for e in await push_notice(adapter, q, make_decrease(1009, GID, SELF_ID)):
+        await inst.on_im_message(e)
+    texts = ["".join(getattr(x, "text", "") for x in e.message.chain) for e in pub]
+    check("退群触发唤醒", len(pub) == 1, str(len(pub)))
+    check("唤醒文本含'退群'", any("退群" in t for t in texts), str(texts))
+    check("唤醒文本含 QQ 号", any("用户1009" in t for t in texts), str(texts))
+    check("退群不进 store",
+          len(await inst.store.get_events(SID, etypes={"member_decrease"})) == 0)
+    await inst.terminate()
+
+    # wake 关 → 收集但不唤醒
+    adapter, q, _ = make_real_adapter(self_id=SELF_ID)
+    inst, pub = await build_plugin(adapter, {"collect_member_decrease": True,
+                                             "wake_member_decrease": False})
+    for e in await push_notice(adapter, q, make_decrease(1009, GID, SELF_ID)):
+        await inst.on_im_message(e)
+    check("wake 关 → 不唤醒", len(pub) == 0, str(len(pub)))
+    await inst.terminate()
+
+asyncio.run(test_member_decrease())
 
 print("\n=== 工具配置（tools_*）===")
 

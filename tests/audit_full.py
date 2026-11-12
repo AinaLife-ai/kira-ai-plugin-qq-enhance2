@@ -233,8 +233,9 @@ def e_event_coverage():
     # 更稳的方式：找所有 E_XXX 常量赋值
     norm_types = set(re.findall(r"etype=(E_\w+)", norm_src))
     rend_types = set(re.findall(r"etype == (E_\w+)", rend_src))
-    # 唤醒级类型不需要渲染
-    wake_types = {"E_KICKED_SELF", "E_TITLE_SELF", "E_EMOJI_LIKE_SELF", "E_PROFILE_LIKE_SELF"}
+    # 唤醒级类型不需要渲染；退群/被踢改走 notice，也不进摘要
+    wake_types = {"E_KICKED_SELF", "E_TITLE_SELF", "E_EMOJI_LIKE_SELF",
+                  "E_PROFILE_LIKE_SELF", "E_MEMBER_DECREASE"}
     missing = norm_types - rend_types - wake_types
     if missing:
         return False, f"renderer 未处理: {sorted(missing)}"
