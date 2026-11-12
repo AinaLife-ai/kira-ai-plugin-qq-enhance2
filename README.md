@@ -122,7 +122,8 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `poke_action_text` | false | 戳一戳用协议端真实文案（默认关=统一显示"戳了戳"，与框架归一解析一致） |
-| `resolve_nickname` | true | 补全事件昵称（框架只带发起人昵称，target 需额外查询；带 10 分钟缓存） |
+| `resolve_nickname` | true | 补全事件昵称（框架只带发起人昵称，target 需额外查询） |
+| `resolve_cache_seconds` | 10 | 昵称/群名片查询缓存（秒）；**0=不缓存**，每次都实时查；并发合并始终生效 |
 | `debug_log` | false | 调试日志：打印事件收集与群动态注入（框架默认不打印群动态） |
 
 ## 兼容性
@@ -195,9 +196,15 @@
 `[System 用户1001(张三)退群了]` / `[System 用户1001(张三)被用户8888(管理员C7)移出群聊]`
 新增 `wake_member_decrease`（默认开）。
 
+### ⚡ 昵称缓存：600 秒 → 10 秒（可配）
+`get_group_member_info` 的昵称/群名片缓存原来是 **600 秒**（我们插件自己定的），
+对"即时查询"来说太长了——改名/换群名片后十分钟内还显示旧名字。
+现在默认 **10 秒**，并新增 `resolve_cache_seconds`（0 = 完全不缓存，每次都实时查）；
+同一 QQ 的**并发合并**始终生效，不会因为 TTL 短而打爆协议端。
+
 ### ✨ 新增配置
 `env_show_time`（默认 true）、`env_fresh_seconds`（300）、`env_slow_seconds`（900）、
-`wake_member_decrease`（true）。
+`wake_member_decrease`（true）、`resolve_cache_seconds`（10）。
 
 ### ✅ 验证
 pytest **127** + 19 个专项脚本，KiraAI **3.1.2 / 3.2.0-beta.1** 双版本全过。

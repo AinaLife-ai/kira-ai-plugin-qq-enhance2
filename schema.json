@@ -227,6 +227,13 @@
         "default": true,
         "hint": "框架的 notice 事件只带发起人昵称，被戳/被禁言/被贴表情的 target 没有昵称。开启后自动查询补全（带 10 分钟缓存），关闭则 target 只显示 QQ 号"
     },
+    "resolve_cache_seconds": {
+        "name": "昵称缓存(秒)",
+        "type": "int",
+        "default": 10,
+        "min": 0,
+        "hint": "群成员昵称/群名片的查询缓存时长；0=不缓存（每次都实时查，最准但请求更多）。并发合并始终生效"
+    },
     "poke_action_text": {
         "name": "戳一戳使用真实动作文案",
         "type": "switch",

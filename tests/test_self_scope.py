@@ -286,3 +286,31 @@ def test_renderer_never_renders_member_decrease():
                  target="1009", target_name="退群人", extra={"sub_type": "leave"})
     text = render_env_summary([ev], now=now)
     assert text == "", text
+
+
+def test_resolve_cache_seconds():
+    """resolve_cache_seconds：默认 10 秒；0 = 不缓存（仍保留并发合并）。"""
+    import asyncio
+    from qq_core.name_resolver import NameResolver
+
+    class _Bot:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_action(self, action, params, timeout=10.0):
+            self.calls += 1
+            return {"status": "ok", "data": {"nickname": "张三", "card": "老张", "role": "member"}}
+
+    class _A:
+        def __init__(self):
+            self.bot = _Bot()
+
+    async def run(ttl):
+        a = _A()
+        r = NameResolver(ttl=ttl)
+        await r.resolve(a, "napcat", "188395693", "1001")
+        await r.resolve(a, "napcat", "188395693", "1001")
+        return a.bot.calls
+
+    assert asyncio.run(run(10)) == 1, "10 秒内第二次应命中缓存"
+    assert asyncio.run(run(0)) == 2, "0 = 不缓存，每次都查"

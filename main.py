@@ -88,6 +88,8 @@ class QQEnhance2Plugin(BasePlugin):
             self.plugin_cfg.get("avatar_desc_cache_seconds"), 60)
 
         self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
+        self.resolve_cache_seconds = _safe_int(
+            self.plugin_cfg.get("resolve_cache_seconds"), 10)
         self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
         # 默认值与 schema.json 保持一致（框架会注入 schema 默认值，这里只是兜底）
         self.wake_hint = self.plugin_cfg.get(
@@ -182,7 +184,7 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.recall_rewriter = RecallRewriter(locator=self.locator)
         self.emoji_rewriter = EmojiRewriter()
-        self.name_resolver = NameResolver()
+        self.name_resolver = NameResolver(ttl=self.resolve_cache_seconds)
 
         logger.info("[QQ增强2] 初始化完成。")
 
