@@ -119,7 +119,7 @@ async def concurrent_rewrite():
 
 content = run(concurrent_rewrite())
 print(f"  改写后: {content!r}")
-check("并发改写不重复追加标注", content.count("[贴表情｜") == 1, content)
+check("并发改写不重复追加标注", content.count("↑该条消息被贴了") == 1, content)
 
 
 print("\n=== 生命周期 1：store 启动/停止多轮 ===")

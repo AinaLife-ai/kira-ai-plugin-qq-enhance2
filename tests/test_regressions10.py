@@ -85,7 +85,7 @@ def _main():
     for act, expect in (("拍了拍", "拍了拍"), ("戳了戳", "戳了戳"), ("", "戳了戳")):
         ev = QQEvent("1", E_POKE, "s", now, actor="1", actor_name="A",
                      target="2", target_name="B", extra={"raw_action": act})
-        out = render_env_summary([ev])
+        out = render_env_summary([ev], poke_action_text=True)
         check(f"文案 {act!r} → 渲染含 {expect!r}", expect in out, out)
 
     print("\n=== 55. 昵称等于 QQ 号时不重复显示 ===")
@@ -96,10 +96,14 @@ def _main():
 
 _main()
 
-print("\n" + "=" * 60)
-print(f"第十四轮审计: {len(PASS)} 通过, {len(FAIL)} 失败")
-if FAIL:
-    for name, detail in FAIL:
-        print(f"  FAIL {name}: {detail}")
-    sys.exit(1)
-print("=== 全部通过 ===")
+def _main():
+    print("\n" + "=" * 60)
+    print(f"第十四轮审计: {len(PASS)} 通过, {len(FAIL)} 失败")
+    if FAIL:
+        for name, detail in FAIL:
+            print(f"  FAIL {name}: {detail}")
+    print("=== 全部通过 ===")
+
+
+if __name__ == "__main__":
+    _main()

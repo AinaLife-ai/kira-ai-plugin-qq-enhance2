@@ -138,7 +138,7 @@ class WakeScheduler:
         emoji_str = format_emoji_list(emoji_ids, count)
         # 对齐框架 [Emoji {desc} (ID: {id})] 格式：bot 拿到 ID 才能回贴
         from .fmt import fmt_user
-        text = f"[System {fmt_user(event.actor, event.actor_name)} 给 {fmt_user(message_author, message_author_name)} 的消息贴了 {emoji_str}"
+        text = f"[System {fmt_user(event.actor, event.actor_name)}给{fmt_user(message_author, message_author_name)}的消息贴了{emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -311,7 +311,7 @@ class WakeScheduler:
         """
         from .fmt import fmt_user
         # 构造唤醒文本（带昵称，对齐框架 用户{QQ}({昵称}) 格式）
-        text = f"[System {fmt_user(operator, actor_name)} 赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
+        text = f"[System {fmt_user(operator, actor_name)}赞了你的资料卡×{count}（过去{duration:.0f}秒）]"
         await self._trigger_text(sid, text, "profile_like_summary", actor_qq=operator)
 
     async def trigger_emoji_like_self(self, event: QQEvent, message_author: str, message_author_name: str, msg_excerpt: str):
@@ -328,7 +328,7 @@ class WakeScheduler:
         from .emoji_display import format_emoji_list
         emoji_str = format_emoji_list(emoji_ids, count)
         from .fmt import fmt_user
-        text = f"[System {fmt_user(event.actor, event.actor_name)} 给你贴了 {emoji_str}"
+        text = f"[System {fmt_user(event.actor, event.actor_name)}给你贴了{emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -338,7 +338,7 @@ class WakeScheduler:
         """触发"头衔授予"唤醒。"""
         title = event.extra.get("title", "")
         from .fmt import fmt_user
-        text = f"[System {fmt_user(event.actor, event.actor_name)} 给你授予头衔\"{title}\"]"
+        text = f"[System {fmt_user(event.actor, event.actor_name)}给你授予头衔\"{title}\"]"
         await self._trigger_text(event.sid, text, "title_self", actor_qq=event.actor)
 
     async def trigger_kicked_self(self, event: QQEvent):
@@ -349,7 +349,7 @@ class WakeScheduler:
         """
         from .fmt import fmt_user
         if event.actor:
-            text = f"[System 你被 {fmt_user(event.actor, event.actor_name)} 移出群聊]"
+            text = f"[System 你被{fmt_user(event.actor, event.actor_name)}移出群聊]"
         else:
             text = "[System 你被移出群聊]"
         await self._trigger_text(event.sid, text, "kicked_self", actor_qq=event.actor)

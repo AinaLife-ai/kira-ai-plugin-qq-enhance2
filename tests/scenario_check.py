@@ -157,9 +157,9 @@ print(f"  msg100: {c0!r}")
 print(f"  msg101: {c1!r}")
 print(f"  msg102: {c2!r}")
 
-check("被撤回消息追加了标注", "[已撤回｜" in c0, c0)
-check("本人撤回措辞正确", "撤回了" in c0 and "张三" in c0, c0)
-check("未撤回消息无标注", "[已撤回｜" not in c1, c1)
+check("被撤回消息追加了标注", "↑该条消息" in c0 and "撤回" in c0, c0)
+check("本人撤回措辞正确", "已撤回" in c0 and "张三" in c0, c0)
+check("未撤回消息无标注", "↑该条消息" not in c1, c1)
 check("管理员撤回标注含身份", "（管理员）" in c2 or "(管理员)" in c2, c2)
 check("原文保留（不删除）", "这是要被撤回的消息" in c0)
 check("撤回归档已清空（已处理）", len(run(locator.get_recalls(SID))) == 0)
@@ -184,7 +184,7 @@ req2 = LLMRequest()
 req2.user_prompt = [Prompt("被贴表情的消息", name="message", source="system")]
 run(rewrite_emoji_like(sid=SID, req=req2, enabled=True))
 print(f"  改写后: {req2.user_prompt[0].content!r}")
-check("贴表情标注追加成功", "[贴表情｜" in req2.user_prompt[0].content)
+check("贴表情标注追加成功", "↑该条消息被贴了" in req2.user_prompt[0].content)
 check("贴表情归档已清空", not _EMOJI_STORE.get(SID))
 
 

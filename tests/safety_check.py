@@ -128,7 +128,7 @@ async def test_msg_content_safety():
     check("消息原文的 XML 不被改写（用户内容原样保留）",
           tricky_text in content, content[:100])
     # 但标注本身不应引入新的 XML 标签
-    check("标注不引入 XML 标签", "[贴表情｜" in content)
+    check("标注不引入 XML 标签", "↑该条消息被贴了" in content and "<" not in content.split("\n")[-1])
 
 
 asyncio.run(test_msg_content_safety())
@@ -159,7 +159,7 @@ async def test_long_text():
     req.user_prompt = [p]
     await rw.rewrite(sid=SID, req=req, enabled=True)
     content = req.user_prompt[0].content
-    check("超长消息能匹配并追加标注", "[贴表情｜" in content, content[-60:])
+    check("超长消息能匹配并追加标注", "↑该条消息被贴了" in content, content[-60:])
     check("超长消息原文完整保留", long_text in content)
 
 
@@ -187,8 +187,8 @@ async def test_prefix_ambiguity():
     await rw.rewrite(sid=SID, req=req, enabled=True)
     content = req.user_prompt[0].content
     # 匹配键在前 50 字，两条都含它 → 多处命中 → 保守跳过（不加标注）
-    print(f"  多处命中 → 是否加标注: {'[贴表情｜' in content}")
-    check("前缀歧义时保守跳过（不误标）", "[贴表情｜" not in content,
+    print(f"  多处命中 → 是否加标注: {'↑该条消息被贴了' in content}")
+    check("前缀歧义时保守跳过（不误标）", "↑该条消息被贴了" not in content,
           "应跳过而不是错标到错误消息")
 
 

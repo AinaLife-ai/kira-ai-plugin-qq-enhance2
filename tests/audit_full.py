@@ -308,9 +308,12 @@ def g_cache_safety():
             problems.append("环境摘要可能未设 persist=False")
     # emoji/recall rewriter 是直接改 p.content（原 message Prompt，persist=True）
     # 这是设计意图（标注需进历史），不是 bug —— 但要确认只追加不替换
-    if "p.content +=" not in er:
+    # 追加语义：允许 `p.content += ...` 或 `text = text + annotation` 后赋回
+    def _append_only(src: str) -> bool:
+        return ("p.content +=" in src) or ("+ annotation" in src) or ("text = text +" in src)
+    if not _append_only(er):
         problems.append("emoji_rewriter 应追加而非替换")
-    if "p.content +=" not in rr:
+    if not _append_only(rr):
         problems.append("recall_rewriter 应追加而非替换")
     if problems:
         return False, "; ".join(problems)

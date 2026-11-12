@@ -331,7 +331,7 @@ async def test_recall_flow():
     await inst.recall_rewriter.rewrite(sid=f"napcat:gm:{GROUP_ID}", req=req)
     content = req.user_prompt[0].content
     print(f"      改写后: {content!r}")
-    check("撤回标注追加到原文", "[已撤回｜" in content, content)
+    check("撤回标注追加到原文", "↑该条消息" in content and "撤回" in content, content)
 
     await inst.terminate()
     return True

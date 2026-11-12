@@ -167,7 +167,7 @@ check("不相关消息未被误改", req.user_prompt[0].content == "完全不相
 req2 = LLMRequest()
 req2.user_prompt = [Prompt("较早的历史消息", name="message", source="system")]
 run(rw.rewrite(sid=SID, req=req2))
-check("下一轮补上标注", "[已撤回｜" in req2.user_prompt[0].content,
+check("下一轮补上标注", "↑该条消息" in req2.user_prompt[0].content,
       req2.user_prompt[0].content)
 check("补上后归档清空", len(run(locator2.get_recalls(SID))) == 0)
 

@@ -67,6 +67,7 @@ def render_env_summary(
     *,
     max_per_type: int = 6,
     max_chars: int = 800,
+    poke_action_text: bool = False,
 ) -> str:
     """渲染环境摘要（分层预算 + 踢旧淘汰）。
 
@@ -105,7 +106,8 @@ def render_env_summary(
         parts = []
         for et in order:
             subset = by_t[et] if et in merge_types else by_t[et][:max_per_type]
-            rendered = _render_type(et, subset, all_events=evts)
+            rendered = _render_type(et, subset, all_events=evts,
+                                    poke_action_text=poke_action_text)
             if rendered:
                 parts.append(rendered)
         if not parts:
@@ -124,7 +126,9 @@ def render_env_summary(
     return candidate
 
 
-def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | None = None) -> str:
+def _render_type(etype: str, events: list[QQEvent],
+                 all_events: list[QQEvent] | None = None,
+                 poke_action_text: bool = False) -> str:
     """渲染单个类型的事件（已排序，新事件在前）。
 
     Args:
@@ -150,9 +154,12 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                 actor_names[ev.actor] = ev.actor_name
             if ev.target:
                 target_names[ev.target] = ev.target_name
-            act = str(ev.extra.get("raw_action") or "").strip()
-            if act and key not in pair_action:
-                pair_action[key] = act
+            # 默认（poke_action_text=False）归一为"戳了戳"，与框架的归一解析保持一致；
+            # 开启后才用协议端真实文案（拍了拍 / 摸了摸 等）
+            if poke_action_text:
+                act = str(ev.extra.get("raw_action") or "").strip()
+                if act and key not in pair_action:
+                    pair_action[key] = act
 
         # 按 target 归并
         by_target: dict[str, list[tuple[str, int]]] = {}

@@ -188,6 +188,12 @@
         "default": true,
         "hint": "框架的 notice 事件只带发起人昵称，被戳/被禁言/被贴表情的 target 没有昵称。开启后自动查询补全（带 10 分钟缓存），关闭则 target 只显示 QQ 号"
     },
+    "poke_action_text": {
+        "name": "戳一戳使用真实动作文案",
+        "type": "switch",
+        "default": false,
+        "hint": "默认关闭——统一显示为「戳了戳」，与框架的归一化解析保持一致。开启后按协议端原文显示（拍了拍 / 摸了摸 等）"
+    },
     "debug_log": {
         "name": "调试日志",
         "type": "switch",

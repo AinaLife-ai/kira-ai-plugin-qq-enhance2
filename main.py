@@ -84,6 +84,7 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
         self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
+        self.poke_action_text = self.plugin_cfg.get("poke_action_text", False)
         self.debug_log = self.plugin_cfg.get("debug_log", False)
 
         # 运行时组件
@@ -613,6 +614,7 @@ class QQEnhance2Plugin(BasePlugin):
                 events,
                 max_per_type=self.perceive_max_per_type,
                 max_chars=self.env_max_chars,
+                poke_action_text=self.poke_action_text,
             )
             if env_text:
                 # 插入到 user_prompt 最前（persist=False，不污染历史）

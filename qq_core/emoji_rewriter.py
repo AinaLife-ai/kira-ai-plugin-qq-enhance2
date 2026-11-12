@@ -3,7 +3,7 @@
 设计要点（对齐撤回改写机制）：
 - 贴表情事件（他人给他人贴）在 im_message 时归档到 store。
 - llm_request 阶段遍历 user_prompt，定位被贴消息的 Prompt，追加标注：
-  \n[贴表情｜用户X(贴的人) 贴了🔥×2]
+  \n↑该条消息被贴了 🔥×2（用户X(贴的人)）
 - 幂等：检查标注是否已追加。
 - 与撤回改写互不影响（各自独立归档、独立追加）。
 - 缓存验证：原文保留，标注追加在尾部，不破坏前缀缓存。
@@ -57,13 +57,15 @@ class EmojiRewriter:
         if not message_id:
             return
         from .emoji_display import format_emoji_list
+        from .fmt import fmt_user
         try:
             cnt = int(float(count))
         except (TypeError, ValueError):
             cnt = 1
         ids = list(emoji_ids) if isinstance(emoji_ids, (list, tuple)) else []
         emoji_str = format_emoji_list(ids, cnt)
-        annotation = f"\n[贴表情｜用户{operator}({operator_name}) 贴了 {emoji_str}]"
+        # ↑ 明确指向"上面那条消息"，避免多条消息时无法判断哪条被贴
+        annotation = f"\n↑该条消息被贴了 {emoji_str}（{fmt_user(operator, operator_name)}）"
 
         store = self._store.setdefault(sid, [])
         for item in store:
@@ -115,6 +117,31 @@ class EmojiRewriter:
             return
 
         rewritten_ids = set()
+
+        def _try_rewrite(text: str) -> tuple[str, set]:
+            """在给定文本里匹配所有归档，返回 (新文本, 命中的 message_id)。"""
+            hit = set()
+            for item in store:
+                original_text = item.get("text", "")
+                if not original_text:
+                    continue
+                match_key = original_text[:50] if len(original_text) >= 50 else original_text
+                if match_key not in text:
+                    continue
+                if text.count(match_key) > 1:
+                    logger.debug(f"[QQ增强2] 贴表情原文匹配到多处，跳过: {match_key[:20]}")
+                    continue
+                annotation = item.get("annotation", "")
+                mid = item.get("message_id", "")
+                if annotation in text:
+                    hit.add(mid)
+                    continue
+                text = text + annotation
+                hit.add(mid)
+                logger.debug(f"[QQ增强2] 贴表情标注已追加: sid={sid}, message_id={mid}")
+            return text, hit
+
+        # ① 本轮 user_prompt（Prompt 对象）
         for p in getattr(req, "user_prompt", []) or []:
             if not isinstance(p, Prompt):
                 continue
@@ -122,25 +149,23 @@ class EmojiRewriter:
                 continue
             if not isinstance(getattr(p, "content", None), str):
                 continue
+            new_content, hit = _try_rewrite(p.content)
+            if hit:
+                p.content = new_content
+                rewritten_ids |= hit
 
-            for item in store:
-                original_text = item.get("text", "")
-                if not original_text:
-                    continue
-                match_key = original_text[:50] if len(original_text) >= 50 else original_text
-                if match_key not in p.content:
-                    continue
-                if p.content.count(match_key) > 1:
-                    logger.debug(f"[QQ增强2] 贴表情原文匹配到多处，跳过: {match_key[:20]}")
-                    continue
-                annotation = item.get("annotation", "")
-                mid = item.get("message_id", "")
-                if annotation in p.content:
-                    rewritten_ids.add(mid)
-                    continue
-                p.content += annotation
-                rewritten_ids.add(mid)
-                logger.debug(f"[QQ增强2] 贴表情标注已追加: sid={sid}, message_id={mid}")
+        # ② 历史 messages（OpenAIMessage 列表）
+        # 关键：被贴表情的消息通常在历史里而非本轮，只扫 user_prompt 会漏掉。
+        for m in getattr(req, "messages", []) or []:
+            if getattr(m, "role", None) != "user":
+                continue
+            content = getattr(m, "content", None)
+            if not isinstance(content, str):
+                continue
+            new_content, hit = _try_rewrite(content)
+            if hit:
+                m.content = new_content
+                rewritten_ids |= hit
 
         if rewritten_ids:
             remain = [it for it in store if it.get("message_id") not in rewritten_ids]
@@ -194,8 +219,9 @@ def _build_annotation(sub_entries: list[dict]) -> str:
     for sub in sub_entries:
         emoji_str = format_emoji_list(sub.get("emoji_ids", []), sub.get("count", 1))
         # 用 fmt_user 统一格式：昵称为空时不会产生"用户1005()"空括号
-        parts.append(f"{fmt_user(sub.get('operator', ''), sub.get('operator_name', ''))} 贴了 {emoji_str}")
-    return "\n[贴表情｜" + "；".join(parts) + "]"
+        parts.append(f"{emoji_str}（{fmt_user(sub.get('operator', ''), sub.get('operator_name', ''))}）")
+    # ↑ 明确指向"上面那条消息"
+    return "\n↑该条消息被贴了 " + "；".join(parts)
 
 # ===== 模块级兼容 API（转发到默认实例，保持向后兼容）=====
 
