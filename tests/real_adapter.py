@@ -19,7 +19,11 @@ import sys
 import time
 from pathlib import Path
 
-KIRAAI_ROOT = Path("/var/minis/workspace/qq_enhance2_design/kiraai312")
+# 框架路径：可用环境变量 KIRA_ROOT 指定（便于跨版本验证）
+import os as _os
+KIRAAI_ROOT = Path(_os.environ.get(
+    "KIRA_ROOT", "/var/minis/workspace/qq_enhance2_design/kiraai312"
+))
 
 
 def ensure_framework_path():

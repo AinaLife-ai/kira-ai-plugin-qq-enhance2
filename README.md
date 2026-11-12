@@ -92,9 +92,21 @@
 
 ## 兼容性
 
+### 框架版本
+
+`core_version: ">=3.1.2"`（无上界）。已实测通过的版本：
+- **v3.1.2**（正式版）
+- **v3.2.0-beta.1**（beta，框架用 `prereleases=True` 校验，beta/rc 也能装）
+
+两个版本上各跑了一遍全量验证（14 个专项 + 10 轮回归 + 深度审计 + 框架 pytest）。
+
+### 插件兼容
+
 已核实以下插件零冲突：
 - **QQ增强1**（互补不重叠：我们做退群/他人事件，它做进群/自己禁言）
 - **S / Z**（互斥，trigger 走标准路径，与 buffer/批次模型同构）
+  - 唤醒事件 sender 用 `system_qq_enhance2` 前缀 → S/Z 判为系统事件，不污染统计
+  - 唤醒文本措辞避开 S 的禁言解析正则（`禁言了你N秒`）
 - **默认聊天 / JEV / anti-harass / multi-decision / midflight / group_manager / history_plugin** 等 10+ 插件
 
 ## 安装
