@@ -82,6 +82,7 @@
 | `tools_profile` | true | 启用 qq_profile / qq_group_profile |
 | `tools_fetch_emoji_like` | true | 启用 fetch_emoji_like |
 | `avatar_desc_prompt` | "" | 头像描述提示词，留空=跟随框架 WebUI 图片识别提示词设置 |
+| `avatar_desc_timeout` | 20 | 头像描述超时（秒），超时降级为只显示 URL |
 
 ### 调试
 

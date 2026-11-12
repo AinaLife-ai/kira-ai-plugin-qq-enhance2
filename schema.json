@@ -163,6 +163,13 @@
         "default": "",
         "hint": "留空=跟随框架 WebUI 的图片识别提示词设置（推荐）；填写后使用该自定义提示词描述头像"
     },
+    "avatar_desc_timeout": {
+        "name": "头像描述超时(秒)",
+        "type": "int",
+        "default": 20,
+        "min": 1,
+        "hint": "VLM 描述头像的超时时间；超时则降级为只显示头像 URL（避免卡住工具调用）"
+    },
     "tools_fetch_emoji_like": {
         "name": "启用贴表情查询工具",
         "type": "switch",

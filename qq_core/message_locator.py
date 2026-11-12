@@ -37,14 +37,34 @@ class MessageLocator:
         adapter=None,
         self_id: str = "",
         cache_size: int = 8192,
+        adapter_resolver=None,
     ):
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
         self.cache_size = cache_size
+        # 多适配器：按 sid 的 adapter_name 动态取 (adapter, self_id)
+        self._adapter_resolver = adapter_resolver
         self._cache: OrderedDict[str, dict] = OrderedDict()  # message_id → {sender, sender_name, text, ts, is_self}
         self._recall_store: dict[str, list[dict]] = {}  # sid → [{message_id, sender, sender_name, text, ts, operator, operator_name, annotation}]
         self._rate_limiter: dict[str, list[float]] = {}  # sid → [timestamps]
         self._lock = asyncio.Lock()
+
+    def _resolve(self, sid: str = ""):
+        """按 sid 取 (adapter, self_id)（多号部署支持）。
+
+        Args:
+            sid: 会话 ID（adapter:gm:group_id 或 adapter:dm:user_id）。
+
+        Returns:
+            (adapter, self_id) 元组；无 resolver 时回退默认。
+        """
+        if self._adapter_resolver and sid:
+            try:
+                name = sid.split(":", 1)[0]
+                return self._adapter_resolver(name)
+            except Exception:
+                pass
+        return self.adapter, self.self_id
 
     async def record_incoming(self, message_id: str, sender: str, sender_name: str, text: str, is_self: bool = False):
         """记录一条收到的消息（L1 缓存）。
@@ -92,8 +112,9 @@ class MessageLocator:
                 self._cache.move_to_end(message_id)
                 return cached.copy()
 
-        # L2 get_msg
-        if not self.adapter:
+        # L2 get_msg（按 sid 取对应适配器，支持多号）
+        adapter, cur_self_id = self._resolve(sid)
+        if not adapter or not getattr(adapter, "bot", None):
             return None
 
         # 令牌桶限流（单 sid 每分钟 ≤ 10 次）
@@ -110,7 +131,7 @@ class MessageLocator:
         # 调用 get_msg（2s 超时）
         try:
             resp = await asyncio.wait_for(
-                self.adapter.bot.get_msg(message_id),
+                adapter.bot.get_msg(message_id),
                 timeout=2.0,
             )
             data = (resp or {}).get("data") or {}
@@ -124,7 +145,7 @@ class MessageLocator:
                 if isinstance(seg, dict) and seg.get("type") == "text":
                     text = str((seg.get("data") or {}).get("text") or "")
                     break
-            is_self = (sender == self.self_id) if self.self_id else False
+            is_self = (sender == cur_self_id) if cur_self_id else False
             result = {
                 "sender": sender,
                 "sender_name": sender_name,
@@ -227,15 +248,17 @@ class MessageLocator:
             "owner" | "admin" | "member" | ""（查询失败）。
         """
         # 框架 sid 格式：adapter:gm:group_id（如 napcat:gm:123456）
-        if not self.adapter or not self.adapter.bot:
-            return ""
         parts = sid.split(":")
         if len(parts) != 3 or parts[1] != "gm":
             return ""
         group_id = parts[2]
+        # 按 sid 取对应适配器（多号部署）
+        adapter, _ = self._resolve(sid)
+        if not adapter or not getattr(adapter, "bot", None):
+            return ""
         try:
             resp = await asyncio.wait_for(
-                self.adapter.bot.send_action("get_group_member_info", {
+                adapter.bot.send_action("get_group_member_info", {
                     "group_id": group_id,
                     "user_id": qq,
                     "no_cache": False,

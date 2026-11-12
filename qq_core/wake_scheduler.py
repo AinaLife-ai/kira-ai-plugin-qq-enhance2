@@ -64,10 +64,13 @@ class WakeScheduler:
         profile_like_merge_window_seconds: int = 10,
         wake_quiet_hours: str = "",
         wake_max_per_hour: int = 60,
+        self_id_resolver=None,
     ):
         self.ctx = ctx
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
+        # 多号部署：按 adapter_name 取该号的 self_id（唤醒事件要用对的号）
+        self._self_id_resolver = self_id_resolver
         self.message_locator = message_locator
         self.wake_self_emoji = wake_self_emoji
         self.wake_others_emoji = wake_others_emoji
@@ -436,7 +439,8 @@ class WakeScheduler:
                 timestamp=int(time.time()),
                 sender=user,
                 message_id=f"qq_enhance2_{event_type}",
-                self_id=self.self_id,
+                # 多号部署：用该会话对应账号的 self_id
+                self_id=self._resolve_self_id(adapter_name),
                 group=group,
                 chain=chain,
                 is_notice=False,  # 不是 notice，是系统唤醒
@@ -554,8 +558,23 @@ class WakeScheduler:
             pass
         return ""
 
-    @staticmethod
-    def _get_supported_elements(adapter_info, ctx=None) -> list[str]:
+    def _resolve_self_id(self, adapter_name: str = "") -> str:
+        """按适配器名取该号的 self_id（多号部署必需）。
+
+        Args:
+            adapter_name: 适配器名（sid 第一段）。
+
+        Returns:
+            self_id；无 resolver 或找不到时回退默认。
+        """
+        if self._self_id_resolver and adapter_name:
+            try:
+                return self._self_id_resolver(adapter_name) or self.self_id
+            except Exception:
+                pass
+        return self.self_id
+
+    def _get_supported_elements(self, adapter_info, ctx=None) -> list[str]:
         """获取适配器支持的元素类型列表。
 
         唤醒事件需要正确的 supported_elements，否则 assemble 阶段不会注册

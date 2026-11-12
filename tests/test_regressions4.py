@@ -100,13 +100,19 @@ def test_bug31_fallback_works():
     class FakeInfo:
         name = "napcat"
 
-    res = WakeScheduler._get_supported_elements(FakeInfo(), None)
+    # 现在是实例方法（需要 self._self_id_resolver 等），用最小实例测试
+    sched = object.__new__(WakeScheduler)
+    sched.ctx = None
+    sched._self_id_resolver = None
+    sched.self_id = "1"
+
+    res = sched._get_supported_elements(FakeInfo(), None)
     assert res == ["text"], f"应回退 [text]，实际: {res}"
 
     # 有 supported_elements 字段时优先用
     class FakeInfo2:
         supported_elements = ["text", "at", "reply"]
-    res2 = WakeScheduler._get_supported_elements(FakeInfo2(), None)
+    res2 = sched._get_supported_elements(FakeInfo2(), None)
     assert res2 == ["text", "at", "reply"], f"应用字段值: {res2}"
     print(f"  ✓ Bug31: 回退与字段优先都正常（{res} / {res2}）")
 

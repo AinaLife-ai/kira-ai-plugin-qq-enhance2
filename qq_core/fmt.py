@@ -1,4 +1,4 @@
-"""通用格式化工具：用户/时间等。
+"""通用格式化工具：用户标识、文件 URI 归一化。
 
 框架标准（core/adapter/src/qq/im.py:619）：
     [Poke 用户1593462500(指尖落黑白)戳了戳你]
@@ -8,6 +8,8 @@
 """
 
 from __future__ import annotations
+
+import re
 
 
 def fmt_user(qq: str, name: str = "") -> str:
@@ -29,3 +31,42 @@ def fmt_user(qq: str, name: str = "") -> str:
     if name:
         return f"用户({name})"
     return "用户(未知)"
+
+
+# 协议端（NapCat/LLOneBot 的 uriToLocalFile）支持的 file 前缀
+_FILE_URI_PREFIXES = ("base64://", "data:", "http://", "https://", "file://")
+
+
+def normalize_file_uri(value) -> str:
+    """归一化 file 参数（协议端只认特定前缀）。
+
+    协议端支持的格式：
+      · base64://<data>                OneBot base64
+      · data:image/png;base64,<data>   Data URL
+      · http:// / https://             远程 URL
+      · file:///path                   文件 URL
+      · /abs/path 或相对路径            本地文件
+
+    **纯 base64 字符串（无前缀）会被当作文件名 → 失败**，
+    这里自动识别并补 `base64://` 前缀（长度 ≥64 且字符集符合 base64）。
+
+    Args:
+        value: 用户/LLM 传入的 file 值。
+
+    Returns:
+        归一化后的字符串（空输入返回空串）。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    # 已带前缀 → 原样返回
+    for prefix in _FILE_URI_PREFIXES:
+        if s.startswith(prefix):
+            return s
+    # 看起来像纯 base64 → 补前缀
+    if len(s) >= 64 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", s):
+        compact = re.sub(r"\s+", "", s)
+        if len(compact) >= 64:
+            return f"base64://{compact}"
+    # 其他情况（本地路径等）原样返回
+    return s

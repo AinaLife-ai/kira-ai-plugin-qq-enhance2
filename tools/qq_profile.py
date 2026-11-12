@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from core.logging_manager import get_logger
 from core.chat.message_utils import KiraMessageBatchEvent
 from core.chat.message_elements import Image
@@ -50,11 +52,13 @@ class QQProfileTool(BaseTool):
         },
     }
 
-    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "", avatar_desc_prompt: str = ""):
+    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
+                 avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
         self.avatar_desc_prompt = avatar_desc_prompt or ""
+        self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
 
     async def execute(
         self,
@@ -104,7 +108,7 @@ class QQProfileTool(BaseTool):
             update_fields["sex"] = int(sex)
 
         # 头像走独立 action（set_qq_avatar），参数是 file
-        avatar_file = (avatar or "").strip()
+        avatar_file = self._normalize_file_uri(avatar)
         if not update_fields and not avatar_file:
             # 未传修改字段：返回当前资料
             return await self._query_user(target)
@@ -236,8 +240,21 @@ class QQProfileTool(BaseTool):
             custom_prompt = (self.avatar_desc_prompt or "").strip() or None
             lang = self._get_locale_lang()
 
-            desc = await desc_img(client=vlm, image=img, prompt=custom_prompt, lang=lang)
-            return (desc or "").strip()
+            # 加超时：VLM 可能很慢（框架对普通工具无超时保护），
+            # 超时则降级为只显示 URL，避免卡住整个工具链。
+            try:
+                desc = await asyncio.wait_for(
+                    desc_img(client=vlm, image=img, prompt=custom_prompt, lang=lang),
+                    timeout=self.avatar_desc_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.debug(f"[QQ增强2] 头像描述超时（>{self.avatar_desc_timeout}s）: {head_url}")
+                return ""
+            # 限制描述长度（避免 VLM 长篇大论刷爆工具输出）
+            desc = (desc or "").strip()
+            if len(desc) > 300:
+                desc = desc[:300] + "…"
+            return desc
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
             return ""
@@ -262,6 +279,56 @@ class QQProfileTool(BaseTool):
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _normalize_file_uri(value) -> str:
+        """归一化 file 参数（协议端只认特定前缀）。
+
+        协议端支持的格式：
+          · base64://<data>                OneBot base64
+          · data:image/png;base64,<data>   Data URL
+          · http:// / https://             远程 URL
+          · file:///path                   文件 URL
+          · /abs/path 或相对路径            本地文件
+
+        **纯 base64 字符串（无前缀）会被当作文件名 → 失败**，
+        这里自动识别并补 `base64://` 前缀。
+
+        Args:
+            value: 用户/LLM 传入的 file 值。
+
+        Returns:
+            归一化后的字符串（空输入返回空串）。
+        """
+        # 优先用 qq_core.fmt 的实现（统一维护）
+        try:
+            from qq_core.fmt import normalize_file_uri
+            return normalize_file_uri(value)
+        except ImportError:
+            pass
+        # 框架内加载时（plugins.<id>.tools）走包内相对定位
+        try:
+            import importlib
+            parts = __name__.split(".")
+            if len(parts) >= 2:
+                parent_pkg = ".".join(parts[:-1])  # plugins.<id>
+                mod = importlib.import_module(f"{parent_pkg}.qq_core.fmt")
+                return mod.normalize_file_uri(value)
+        except Exception:
+            pass
+        # 最后兜底：就地实现（极简版）
+        import re as _re
+        s = str(value or "").strip()
+        if not s:
+            return ""
+        for prefix in ("base64://", "data:", "http://", "https://", "file://"):
+            if s.startswith(prefix):
+                return s
+        if len(s) >= 64 and _re.fullmatch(r"[A-Za-z0-9+/=\s]+", s):
+            compact = _re.sub(r"\s+", "", s)
+            if len(compact) >= 64:
+                return f"base64://{compact}"
+        return s
 
     @staticmethod
     def _normalize_sex(val) -> str:

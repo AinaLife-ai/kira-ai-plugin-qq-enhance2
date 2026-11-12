@@ -87,8 +87,15 @@ class QQGroupProfileTool(BaseTool):
         group_id = event.session.session_id
         target = str(user_id) if user_id else self.self_id
         is_self = (target == self.self_id) if self.self_id else False
-        portrait_file = (group_portrait or "").strip()
-
+        # 归一化 file（协议端只认特定前缀，纯 base64 需补 base64://）
+        try:
+            from qq_core.fmt import normalize_file_uri
+        except ImportError:
+            import importlib
+            parts = __name__.split(".")
+            parent_pkg = ".".join(parts[:-1]) if len(parts) >= 2 else "qq_core"
+            normalize_file_uri = importlib.import_module(f"{parent_pkg}.qq_core.fmt").normalize_file_uri
+        portrait_file = normalize_file_uri(group_portrait)
         # 群头像是群级操作（需管理员权限），与"操作自己/他人"无关，单独处理
         if portrait_file:
             try:

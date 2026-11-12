@@ -67,6 +67,7 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
+        self.avatar_desc_timeout = float(self.plugin_cfg.get("avatar_desc_timeout", 20) or 20)
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
         self.debug_log = self.plugin_cfg.get("debug_log", False)
@@ -74,6 +75,7 @@ class QQEnhance2Plugin(BasePlugin):
         # 运行时组件
         self.adapter = None
         self.self_id = ""
+        self._adapters: dict[str, tuple] = {}   # adapter_name → (adapter, self_id)
         self.store: Optional[EventStore] = None
         self.wake_scheduler: Optional[WakeScheduler] = None
         self.locator: Optional[MessageLocator] = None
@@ -81,18 +83,33 @@ class QQEnhance2Plugin(BasePlugin):
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
 
     async def initialize(self):
-        """初始化运行时组件。"""
-        # 获取 QQ 适配器（默认第一个）
+        """初始化运行时组件。
+
+        支持多 QQ 适配器（多号部署）：维护 adapter_name → (adapter, self_id) 映射，
+        事件处理时按 event.adapter.name / sid 动态取对应适配器，
+        避免"用第一个号的身份处理第二个号的事件"。
+        """
+        # 收集所有 QQ 适配器
+        self._adapters: dict[str, tuple] = {}   # adapter_name → (adapter, self_id)
         for ada in self.ctx.adapter_mgr.get_all_adapters():
-            if ada.platform == "QQ":
-                self.adapter = ada
-                self.self_id = str((ada.config or {}).get("self_id", ""))
-                break
-        if not self.adapter:
+            if getattr(ada, "platform", None) != "QQ":
+                continue
+            name = getattr(getattr(ada, "info", None), "name", None) or getattr(ada, "name", "")
+            sid_self = str((getattr(ada, "config", None) or {}).get("self_id", "") or "")
+            if name:
+                self._adapters[name] = (ada, sid_self)
+
+        if not self._adapters:
             logger.warning("[QQ增强2] 未找到 QQ 适配器，插件降级运行。")
             return
 
-        # 初始化组件
+        # 默认适配器（第一个）—— 用于无会话上下文时的兜底
+        first_name = next(iter(self._adapters))
+        self.adapter, self.self_id = self._adapters[first_name]
+        if len(self._adapters) > 1:
+            logger.info(f"[QQ增强2] 检测到 {len(self._adapters)} 个 QQ 适配器: {list(self._adapters)}")
+
+        # 初始化组件（locator 支持多适配器：按 sid 动态取）
         data_dir = self.ctx.get_plugin_data_dir()
         self.store = EventStore(
             data_dir,
@@ -107,6 +124,7 @@ class QQEnhance2Plugin(BasePlugin):
             adapter=self.adapter,
             self_id=self.self_id,
             cache_size=8192,
+            adapter_resolver=self._resolve_adapter,
         )
 
         self.wake_scheduler = WakeScheduler(
@@ -123,11 +141,38 @@ class QQEnhance2Plugin(BasePlugin):
             profile_like_merge_window_seconds=self.profile_like_merge_window_seconds,
             wake_quiet_hours=self.wake_quiet_hours,
             wake_max_per_hour=self.wake_max_per_hour,
+            self_id_resolver=self._resolve_self_id,
         )
 
         self.recall_rewriter = RecallRewriter(locator=self.locator)
 
         logger.info("[QQ增强2] 初始化完成。")
+
+    def _resolve_adapter(self, adapter_name: str):
+        """按适配器名取 (adapter, self_id)；找不到时回退默认。
+
+        Args:
+            adapter_name: 适配器名（sid 的第一段）。
+
+        Returns:
+            (adapter, self_id) 元组。
+        """
+        adapters = getattr(self, "_adapters", None) or {}
+        hit = adapters.get(adapter_name)
+        if hit:
+            return hit
+        return getattr(self, "adapter", None), getattr(self, "self_id", "")
+
+    def _resolve_self_id(self, adapter_name: str) -> str:
+        """按适配器名取该号的 self_id（多号部署必需）。
+
+        Args:
+            adapter_name: 适配器名。
+
+        Returns:
+            self_id 字符串；找不到时回退默认。
+        """
+        return self._resolve_adapter(adapter_name)[1]
 
     async def terminate(self):
         """清理资源。"""
@@ -186,10 +231,15 @@ class QQEnhance2Plugin(BasePlugin):
         group_id = str(raw.get("group_id") or "")
         sid = event.session.sid if hasattr(event.session, 'sid') else f"napcat:gm:{group_id}"
 
+        # 多号部署：按事件所属适配器取该号的 self_id
+        # （否则会用第一个号的身份判断"是否自己"，导致 group_ban/poke 误判）
+        adapter_name = sid.split(":", 1)[0] if ":" in sid else ""
+        cur_self_id = self._resolve_self_id(adapter_name)
+
         qq_event = normalize_notice(
             raw,
             sid=sid,
-            self_id=self.self_id,
+            self_id=cur_self_id,
             group_id=group_id,
         )
         if not qq_event:
@@ -347,7 +397,7 @@ class QQEnhance2Plugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def inject_tools(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
-        """注入 QQ 工具。"""
+        """注入 QQ 工具（按当前会话的适配器绑定，支持多号）。"""
         if not self.adapter:
             return
 
@@ -355,9 +405,18 @@ class QQEnhance2Plugin(BasePlugin):
         if event.adapter.platform != "QQ":
             return
 
+        # 按会话的适配器取（多号部署时用对应账号）
+        sid = getattr(event, "sid", "") or ""
+        adapter_name = sid.split(":", 1)[0] if ":" in sid else ""
+        cur_adapter, cur_self_id = self._resolve_adapter(adapter_name)
+        if not cur_adapter:
+            cur_adapter, cur_self_id = self.adapter, self.self_id
+
         if self.tools_profile:
-            req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=self.adapter, self_id=self.self_id, avatar_desc_prompt=self.avatar_desc_prompt))
-            req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=self.adapter, self_id=self.self_id))
+            req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
+                                           avatar_desc_prompt=self.avatar_desc_prompt,
+                                           avatar_desc_timeout=self.avatar_desc_timeout))
+            req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
 
         if self.tools_fetch_emoji_like:
-            req.tool_set.add(FetchEmojiLikeTool(ctx=self.ctx, adapter=self.adapter))
+            req.tool_set.add(FetchEmojiLikeTool(ctx=self.ctx, adapter=cur_adapter))
