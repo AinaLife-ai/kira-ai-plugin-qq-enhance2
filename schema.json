@@ -151,6 +151,12 @@
         "default": true,
         "hint": "关=只显示'某条消息被撤回'，不显示原文"
     },
+    "recall_in_env": {
+        "name": "撤回进群动态摘要",
+        "type": "switch",
+        "default": false,
+        "hint": "默认关闭——被撤回的原文已在原消息下标注 [已撤回｜...]，摘要里再写一遍是重复的无效信息。仅当你希望即使原文不在上下文中也能看到撤回事件时才开启"
+    },
     "tools_profile": {
         "name": "启用资料工具",
         "type": "switch",

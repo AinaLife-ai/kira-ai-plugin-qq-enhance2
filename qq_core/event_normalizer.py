@@ -87,6 +87,31 @@ def _nick(raw: dict, *keys: str) -> str:
     return ""
 
 
+def _extract_poke_texts(raw: dict) -> tuple[str, str]:
+    """提取戳一戳的「动作」与「后缀」文案（兼容三家协议端）。
+
+    Args:
+        raw: 原始 notice。
+
+    Returns:
+        (action_text, suffix_text)，取不到时为空串。
+    """
+    # 1. NapCat：raw_info[2].txt / raw_info[4].txt
+    raw_info = raw.get("raw_info")
+    if isinstance(raw_info, list) and len(raw_info) > 4:
+        try:
+            act = raw_info[2].get("txt") if isinstance(raw_info[2], dict) else ""
+            suf = raw_info[4].get("txt") if isinstance(raw_info[4], dict) else ""
+            if act or suf:
+                return str(act or ""), str(suf or "")
+        except Exception:
+            pass
+    # 2. SnowLuma / LLOneBot：action / suffix
+    act = _nick(raw, "action", "action_str")
+    suf = _nick(raw, "suffix", "suffix_str")
+    return act, suf
+
+
 def normalize_notice(
     raw: dict,
     *,
@@ -136,8 +161,12 @@ def normalize_notice(
             return None
         else:
             et = E_POKE
-        extra = {"raw_action": _nick(raw, "action", "action_str"),
-                 "raw_suffix": _nick(raw, "suffix", "suffix_str")}
+        # 戳一戳的动作文案：三家协议端字段不同
+        #   · NapCat    : msg["raw_info"][2]["txt"] / [4]["txt"]
+        #   · SnowLuma  : msg["action"] / msg["suffix"]
+        #   · LLOneBot  : msg["action"] / msg["suffix"]（部分版本带 raw_info）
+        act, suf = _extract_poke_texts(raw)
+        extra = {"raw_action": act, "raw_suffix": suf}
         return QQEvent(
             eid=_eid(), etype=et, sid=sid, ts=ts,
             actor=user_id, target=target_id, extra=extra,

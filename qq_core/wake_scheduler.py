@@ -448,7 +448,10 @@ class WakeScheduler:
             message=KiraIMMessage(
                 timestamp=int(time.time()),
                 sender=user,
-                message_id=f"qq_enhance2_{event_type}",
+                # 对齐框架 notice 的写法（core/adapter/src/qq/im.py:468 用 "None"）：
+                # 唤醒事件是系统注入，不是真实消息，无需长串 ID。
+                # 日志里会显示为 [adapter | None] [group | 系统唤醒]。
+                message_id="None",
                 # 多号部署：用该会话对应账号的 self_id
                 self_id=self._resolve_self_id(adapter_name),
                 group=group,

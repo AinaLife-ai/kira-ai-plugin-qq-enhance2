@@ -83,6 +83,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
         self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
+        self.recall_in_env = self.plugin_cfg.get("recall_in_env", False)
         self.debug_log = self.plugin_cfg.get("debug_log", False)
 
         # 运行时组件
@@ -117,7 +118,7 @@ class QQEnhance2Plugin(BasePlugin):
                 continue
             cfg = (getattr(ada, "config", None)
                    or getattr(info, "config", None) or {})
-            sid_self = str(cfg.get("self_id", "") or "") if isinstance(cfg, dict) else ""
+            sid_self = self._extract_self_id(ada, info, cfg)
             self._adapters[name] = (ada, sid_self)
 
         if not self._adapters:
@@ -170,6 +171,84 @@ class QQEnhance2Plugin(BasePlugin):
         self.name_resolver = NameResolver()
 
         logger.info("[QQ增强2] 初始化完成。")
+
+    @staticmethod
+    def _get_self_nickname(adapter) -> str:
+        """取 bot 自己的昵称（框架在登录时缓存在 bot.self_nickname）。
+
+        Args:
+            adapter: 适配器实例。
+
+        Returns:
+            昵称；取不到返回空串。
+        """
+        bot = getattr(adapter, "bot", None)
+        if bot is not None:
+            nm = getattr(bot, "self_nickname", None)
+            if nm:
+                return str(nm).strip()
+        return ""
+
+    @staticmethod
+    def _extract_self_id(ada, info, cfg) -> str:
+        """提取适配器对应账号的 self_id（机器人自己的 QQ 号）。
+
+        **框架 QQ 适配器的配置字段是 `bot_pid`，不是 `self_id`**
+        （见 core/adapter/src/qq/schema.json + qq.py: `bt_uin=self.config["bot_pid"]`）。
+        用错字段会拿到空串 → 所有"这是不是我自己"的判断全部失效
+        （例如 bot 自己戳别人会被当成他人事件记录）。
+
+        提取顺序：
+        1. config["bot_pid"]（框架标准字段）★
+        2. config["self_id"]（部分实现/旧配置）
+        3. ada.bot.self_id（运行时由 bot.run() 设置）
+        4. info.config 里的同名字段
+
+        Args:
+            ada: 适配器实例。
+            info: AdapterInfo。
+            cfg: 已取到的 config dict。
+
+        Returns:
+            self_id 字符串；都取不到时返回空串。
+        """
+        # 1/2. 从 config 取（bot_pid 优先）
+        if isinstance(cfg, dict):
+            for key in ("bot_pid", "self_id", "bot_uin", "uin"):
+                v = cfg.get(key)
+                if v:
+                    return str(v)
+        # 3. 运行时 bot 实例上的 self_id
+        bot = getattr(ada, "bot", None)
+        if bot is not None:
+            v = getattr(bot, "self_id", None)
+            if v:
+                return str(v)
+        # 4. info.config 兜底
+        icfg = getattr(info, "config", None)
+        if isinstance(icfg, dict):
+            for key in ("bot_pid", "self_id"):
+                v = icfg.get(key)
+                if v:
+                    return str(v)
+        return ""
+
+    def _env_etypes(self) -> set:
+        """环境摘要要渲染的事件类型。
+
+        注意：**撤回（E_RECALL）默认不进摘要** —— 被撤回的原文已经通过
+        `recall_rewriter` 在原消息下追加了 `[已撤回｜...]` 标注，摘要里再写
+        一遍"X 撤回了一条消息"是重复的无效信息（且会挤占摘要预算）。
+        如需保留，打开 `recall_in_env`。
+
+        Returns:
+            事件类型集合。
+        """
+        types = {E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE,
+                 E_TITLE, E_CARD, E_ADMIN}
+        if self.recall_in_env:
+            types.add(E_RECALL)
+        return types
 
     def _iter_qq_adapters(self):
         """遍历已启动的 QQ 适配器，产出 (adapter_instance, info)。
@@ -385,10 +464,9 @@ class QQEnhance2Plugin(BasePlugin):
                         cur_adapter, adapter_name, gid_for_name, qq_event.actor,
                     )
                 if qq_event.target and not qq_event.target_name:
-                    # 目标是自己时直接用自己昵称（避免多余请求）
-                    if self.self_id and str(qq_event.target) == str(cur_self_id):
-                        qq_event.target_name = str(getattr(sender, "nickname", "") or "") \
-                            if sender and str(getattr(sender, "user_id", "")) == str(cur_self_id) else ""
+                    # 目标是自己时用 bot 自己的昵称（省一次查询）
+                    if cur_self_id and str(qq_event.target) == str(cur_self_id):
+                        qq_event.target_name = self._get_self_nickname(cur_adapter)
                     if not qq_event.target_name:
                         qq_event.target_name = await self.name_resolver.resolve(
                             cur_adapter, adapter_name, gid_for_name, qq_event.target,
@@ -529,7 +607,7 @@ class QQEnhance2Plugin(BasePlugin):
             events = await self.store.get_events(
                 sid,
                 since_ts=time.time() - self.perceive_window_seconds,
-                etypes={E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_MEMBER_DECREASE, E_RECALL, E_TITLE, E_CARD, E_ADMIN},
+                etypes=self._env_etypes(),
             )
             env_text = render_env_summary(
                 events,

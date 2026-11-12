@@ -140,6 +140,9 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
         pair_count: dict[tuple[str, str], int] = {}
         actor_names: dict[str, str] = {}
         target_names: dict[str, str] = {}
+        # 动作文案：优先用协议端给的（NapCat raw_info / SnowLuma action）
+        # 如"拍了拍""戳了戳"，取不到时回退默认"戳了戳"
+        pair_action: dict[tuple[str, str], str] = {}
         for ev in events:
             key = (ev.actor, ev.target)
             pair_count[key] = pair_count.get(key, 0) + 1
@@ -147,6 +150,9 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                 actor_names[ev.actor] = ev.actor_name
             if ev.target:
                 target_names[ev.target] = ev.target_name
+            act = str(ev.extra.get("raw_action") or "").strip()
+            if act and key not in pair_action:
+                pair_action[key] = act
 
         # 按 target 归并
         by_target: dict[str, list[tuple[str, int]]] = {}
@@ -159,7 +165,8 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
             total = sum(c for _, c in lst)
             if len(lst) == 1:
                 actor, cnt = lst[0]
-                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} 戳了戳 {_fmt_user(target, tname)}"
+                act = pair_action.get((actor, target), "") or "戳了戳"
+                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} {act} {_fmt_user(target, tname)}"
                 if cnt > 1:
                     part += f"×{cnt}"
             else:
@@ -169,7 +176,11 @@ def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | 
                     for a, _ in lst[:3]
                 ]
                 more = f"等{len(lst)}人" if len(lst) > 3 else ""
-                part = f"{'、'.join(names)}{more} 戳了戳 {_fmt_user(target, tname)}"
+                # 多人时动作可能不同，用最常见的那个
+                acts = [pair_action.get((a, target), "") for a, _ in lst]
+                acts = [a for a in acts if a]
+                act = max(set(acts), key=acts.count) if acts else "戳了戳"
+                part = f"{'、'.join(names)}{more} {act} {_fmt_user(target, tname)}"
                 if total > len(lst):
                     part += f"（共{total}次）"
             parts.append(part)
