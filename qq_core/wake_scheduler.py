@@ -513,16 +513,16 @@ class WakeScheduler:
         唤醒事件需要正确的 `supported_elements`，否则 assemble 阶段不会注册
         对应 tag（text/img/at/reply/emoji…），LLM 输出 `<img>`、`<at>` 会被丢掉。
 
-        入参可能是两种东西：
-          · AdapterInfo（有 supported_elements 字段）
-          · 适配器实例（`ctx.adapter_mgr.get_adapter(name)` 的返回，实际就是它）
+        **不要碰 `message_types`**：它是框架的 deprecated 属性，
+        连 `hasattr(adapter, "message_types")` 都会触发 DeprecationWarning 刷日志。
+        这里直接走 `IMCapability._supported_elements`。
 
         Args:
             adapter_info: AdapterInfo 或适配器实例。
             ctx: PluginContext（用于按名字取适配器实例）。
 
         Returns:
-            元素类型列表；都取不到时回退 ["text"]（保证至少能发文本）。
+            元素类型列表；都取不到时回退 ["text"]。
         """
         # 1. 直接字段
         try:
@@ -535,30 +535,24 @@ class WakeScheduler:
         # 2. 定位适配器实例
         adapter = None
         try:
-            if hasattr(adapter_info, "message_types") or hasattr(adapter_info, "get_capability"):
+            if hasattr(adapter_info, "get_capability"):
                 adapter = adapter_info
-            else:
+            elif ctx is not None:
                 name = (getattr(adapter_info, "name", None)
                         or getattr(getattr(adapter_info, "info", None), "name", None))
-                if ctx is not None and name:
+                if name:
                     adapter = ctx.adapter_mgr.get_adapter(name)
         except Exception:
             adapter = None
 
+        # 3. 现代 API：IMCapability._supported_elements
         if adapter is not None:
-            # 2a. 元数据对象（部分实现）
             try:
-                meta = getattr(adapter, "_metadata", None)
-                elems = getattr(meta, "supported_elements", None)
-                if isinstance(elems, (list, tuple)) and elems:
-                    return list(elems)
-            except Exception:
-                pass
-            # 2b. IMAdapter.message_types（框架 3.1/3.2 都有；deprecated 但可靠）
-            try:
-                mt = getattr(adapter, "message_types", None)
-                if isinstance(mt, (list, tuple)) and mt:
-                    return list(mt)
+                from core.adapter.capabilities import IMCapability
+                im = adapter.get_capability(IMCapability)
+                els = getattr(im, "_supported_elements", None)
+                if isinstance(els, (list, tuple)) and els:
+                    return list(els)
             except Exception:
                 pass
 
