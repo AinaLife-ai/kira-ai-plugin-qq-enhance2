@@ -1,0 +1,166 @@
+{
+    "collect_poke": {
+        "name": "感知他人戳一戳",
+        "type": "switch",
+        "default": true,
+        "hint": "收集群内他人之间的戳一戳事件，合并入环境摘要"
+    },
+    "collect_emoji_like": {
+        "name": "感知他人贴表情",
+        "type": "switch",
+        "default": true,
+        "hint": "收集群内他人给他人消息贴表情的事件，合并入环境摘要"
+    },
+    "collect_group_ban": {
+        "name": "感知他人被禁言",
+        "type": "switch",
+        "default": true,
+        "hint": "收集群内成员被禁言/解除禁言事件，合并入环境摘要"
+    },
+    "collect_recall": {
+        "name": "感知撤回",
+        "type": "switch",
+        "default": true,
+        "hint": "收集消息撤回事件，在原文下补充撤回标注"
+    },
+    "collect_member_decrease": {
+        "name": "感知退群/被踢",
+        "type": "switch",
+        "default": true,
+        "hint": "收集成员退群/被移出群聊事件（进群归QQ增强1）"
+    },
+    "collect_title": {
+        "name": "感知头衔授予",
+        "type": "switch",
+        "default": false,
+        "hint": "收集群成员头衔授予事件"
+    },
+    "collect_card_admin": {
+        "name": "感知名片/管理员变更",
+        "type": "switch",
+        "default": false,
+        "hint": "收集群名片更新、管理员变动事件"
+    },
+    "wake_self_emoji": {
+        "name": "自己消息被贴表情→唤醒",
+        "type": "switch",
+        "default": true,
+        "hint": "自己的消息被贴表情时立即唤醒（trigger 进批次合并）"
+    },
+    "wake_others_emoji": {
+        "name": "他人消息被贴表情→可唤醒",
+        "type": "switch",
+        "default": false,
+        "hint": "他人的消息被贴表情时也可唤醒（用于互动），默认冷却20秒防刷屏"
+    },
+    "others_emoji_cooldown": {
+        "name": "他人表情唤醒冷却(秒)",
+        "type": "int",
+        "default": 20,
+        "min": 0,
+        "hint": "他人消息被贴表情的唤醒冷却时间，防刷屏"
+    },
+    "wake_profile_like": {
+        "name": "资料卡被赞→唤醒",
+        "type": "switch",
+        "default": true,
+        "hint": "资料卡被点赞时唤醒（同用户10秒内合并防抖）"
+    },
+    "wake_title": {
+        "name": "头衔授予→唤醒",
+        "type": "switch",
+        "default": true,
+        "hint": "自己被封头衔时立即唤醒"
+    },
+    "wake_kicked": {
+        "name": "被移出群→唤醒",
+        "type": "switch",
+        "default": true,
+        "hint": "自己被移出群聊时唤醒"
+    },
+    "profile_like_merge_window_seconds": {
+        "name": "点赞合并窗口(秒)",
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "hint": "同一用户同一会话在该时间内的资料卡点赞合并为一条唤醒，防抖且符合人类理解"
+    },
+    "wake_quiet_hours": {
+        "name": "静默时段",
+        "type": "string",
+        "default": "",
+        "hint": "如 23:00-08:00，该时段内只入状态机不唤醒；空=不静默"
+    },
+    "wake_max_per_hour": {
+        "name": "每会话每小时最大唤醒次数",
+        "type": "int",
+        "default": 60,
+        "hint": "-1=无限制"
+    },
+    "perceive_window_seconds": {
+        "name": "感知时间窗口(秒)",
+        "type": "int",
+        "default": 1800,
+        "hint": "他人事件的感知窗口，只渲染/唤醒窗口内的事件"
+    },
+    "perceive_max_events": {
+        "name": "每会话最多保留事件数",
+        "type": "int",
+        "default": 20,
+        "hint": "LRU 淘汰最旧事件"
+    },
+    "perceive_max_per_type": {
+        "name": "每类型最多渲染条数",
+        "type": "int",
+        "default": 6,
+        "hint": "环境摘要中每种事件类型最多渲染的条数"
+    },
+    "env_max_chars": {
+        "name": "环境摘要字符上限",
+        "type": "int",
+        "default": 800,
+        "hint": "超限从最旧事件整条删除（不截断字符串），保证保留最新事件"
+    },
+    "env_inject_min_interval": {
+        "name": "摘要注入最小间隔(秒)",
+        "type": "int",
+        "default": 0,
+        "hint": "0=每轮注入增量；大于0时限制注入频率省token"
+    },
+    "env_ttl_hours": {
+        "name": "事件落盘保留(小时)",
+        "type": "int",
+        "default": 24,
+        "hint": "落盘事件保留时长，重启后仍可感知"
+    },
+    "recall_rewrite": {
+        "name": "撤回消息原文下补充标注",
+        "type": "switch",
+        "default": true,
+        "hint": "撤回事件在被撤回消息的Prompt后追加标注，原文保留"
+    },
+    "recall_show_content": {
+        "name": "撤回时显示原文",
+        "type": "switch",
+        "default": true,
+        "hint": "关=只显示'某条消息被撤回'，不显示原文"
+    },
+    "tools_profile": {
+        "name": "启用资料工具",
+        "type": "switch",
+        "default": true,
+        "hint": "启用 qq_profile / qq_group_profile 工具"
+    },
+    "tools_fetch_emoji_like": {
+        "name": "启用贴表情查询工具",
+        "type": "switch",
+        "default": true,
+        "hint": "启用 fetch_emoji_like 工具"
+    },
+    "debug_log": {
+        "name": "调试日志",
+        "type": "switch",
+        "default": false,
+        "hint": "输出详细调试日志"
+    }
+}
