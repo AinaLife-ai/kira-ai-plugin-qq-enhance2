@@ -3,7 +3,8 @@
 设计要点：
 - 不传 user_id → 操作自己（可修改昵称/签名/性别）。
 - 传 user_id 且 != self_id → 查询他人（只读）。
-- 返回完整资料（昵称/签名/性别/头像URL best-effort）。
+- 返回完整资料（昵称/签名/性别/头像）。
+- 头像查看：下载头像 → 用框架 VLM 生成图片描述（真正"看"头像，而非只给 URL）。
 - 头像修改：不支持（三家协议均无 API）。
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 from core.logging_manager import get_logger
 from core.chat.message_utils import KiraMessageBatchEvent
+from core.chat.message_elements import Image
 from core.utils.tool_utils import BaseTool
 from core.plugin import PluginContext
 
@@ -21,7 +23,7 @@ class QQProfileTool(BaseTool):
     """QQ 用户资料工具（读+写合体）。"""
 
     name = "qq_profile"
-    description = "查询或修改QQ用户资料。不传 user_id 时操作自己；传 user_id 时查询他人（仅查询，不可修改他人）。修改时只传需要修改的字段。"
+    description = "查询或修改QQ用户资料。不传 user_id 时操作自己；传 user_id 时查询他人（仅查询，不可修改他人）。修改时只传需要修改的字段。查询时会查看头像内容。"
     parameters = {
         "type": "object",
         "properties": {
@@ -109,7 +111,7 @@ class QQProfileTool(BaseTool):
             return f"修改失败：{e}"
 
     async def _query_user(self, qq: str) -> str:
-        """查询用户资料。
+        """查询用户资料（含头像读图）。
 
         Args:
             qq: QQ 号。
@@ -134,11 +136,44 @@ class QQProfileTool(BaseTool):
             result += f"  昵称：{nickname or '（未提供）'}\n"
             result += f"  个性签名：{personal_note or '（未提供）'}\n"
             result += f"  性别：{sex_str}\n"
+
+            # 头像：读图（VLM 描述），而非只给 URL
             if head_url:
-                result += f"  头像：{head_url}\n"
+                avatar_desc = await self._describe_avatar(head_url)
+                if avatar_desc:
+                    result += f"  头像：{avatar_desc}\n"
+                else:
+                    result += f"  头像：{head_url}\n"
             else:
                 result += f"  头像：（该协议端未提供）\n"
             return result
         except Exception as e:
             logger.debug(f"[QQ增强2] get_stranger_info 失败: {qq}: {e}")
             return f"查询失败：{e}"
+
+    async def _describe_avatar(self, head_url: str) -> str:
+        """下载头像并用 VLM 生成描述（真正"看"头像）。
+
+        Args:
+            head_url: 头像 URL。
+
+        Returns:
+            头像描述文本；失败时返回空串。
+        """
+        try:
+            from core.utils.common_utils import desc_img
+
+            img = Image(head_url)
+            # 用框架默认 VLM 描述（与用户发图片同一条处理链）
+            vlm = None
+            try:
+                vlm = self.ctx.provider_mgr.get_default_vlm()
+            except Exception:
+                vlm = None
+            if vlm is None:
+                return ""
+            desc = await desc_img(client=vlm, image=img, prompt="描述这个QQ用户头像的内容，包括人物形象、风格、颜色等，100字以内。", lang="zh")
+            return (desc or "").strip()
+        except Exception as e:
+            logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
+            return ""

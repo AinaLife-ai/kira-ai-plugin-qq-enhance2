@@ -53,8 +53,8 @@
         "default": false,
         "hint": "他人的消息被贴表情时也可唤醒（用于互动），默认冷却20秒防刷屏"
     },
-    "others_emoji_cooldown": {
-        "name": "他人表情唤醒冷却(秒)",
+    "wake_others_emoji_cooldown": {
+        "name": "他人消息被贴表情唤醒冷却(秒)",
         "type": "int",
         "default": 20,
         "min": 0,

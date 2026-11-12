@@ -47,7 +47,7 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.wake_self_emoji = self.plugin_cfg.get("wake_self_emoji", True)
         self.wake_others_emoji = self.plugin_cfg.get("wake_others_emoji", False)
-        self.others_emoji_cooldown = int(self.plugin_cfg.get("others_emoji_cooldown", 20))
+        self.wake_others_emoji_cooldown = int(self.plugin_cfg.get("wake_others_emoji_cooldown", 20))
         self.wake_profile_like = self.plugin_cfg.get("wake_profile_like", True)
         self.wake_title = self.plugin_cfg.get("wake_title", True)
         self.wake_kicked = self.plugin_cfg.get("wake_kicked", True)
@@ -115,7 +115,7 @@ class QQEnhance2Plugin(BasePlugin):
             message_locator=self.locator,
             wake_self_emoji=self.wake_self_emoji,
             wake_others_emoji=self.wake_others_emoji,
-            others_emoji_cooldown=self.others_emoji_cooldown,
+            wake_others_emoji_cooldown=self.wake_others_emoji_cooldown,
             wake_profile_like=self.wake_profile_like,
             wake_title=self.wake_title,
             wake_kicked=self.wake_kicked,

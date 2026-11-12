@@ -18,7 +18,7 @@
 - **被移出群**：自己被移出群聊时立即唤醒。
 
 ### 工具层
-- **`qq_profile`**：查询或修改 QQ 用户资料（昵称/个性签名/性别）。不传 user_id=操作自己；传 user_id=查询他人（只读）。
+- **`qq_profile`**：查询或修改 QQ 用户资料（昵称/个性签名/性别）。不传 user_id=操作自己；传 user_id=查询他人（只读）。**查询时自动下载头像并用 VLM 查看头像内容**（不是只给 URL，LLM 能真正"看到"头像）。
 - **`qq_group_profile`**：查询或修改群成员资料（群名片/头衔）。不传 user_id=操作自己；传 user_id=查询他人（只读）。
 - **`fetch_emoji_like`**：拉取指定 QQ 消息的全部贴表情回应（含贴的人、表情 ID、次数）。支持分页。
 
@@ -39,7 +39,7 @@
 | `collect_member_decrease` | true | 感知退群/被踢 |
 | `wake_self_emoji` | true | 被贴表情→唤醒 |
 | `wake_others_emoji` | false | 他人消息被贴表情→可唤醒（默认关） |
-| `others_emoji_cooldown` | 20 | 他人表情唤醒冷却（秒） |
+| `wake_others_emoji_cooldown` | 20 | 他人消息被贴表情唤醒冷却（秒） |
 | `wake_profile_like` | true | 资料卡被赞→唤醒 |
 | `wake_title` | true | 头衔授予→唤醒 |
 | `wake_kicked` | true | 被移出群→唤醒 |

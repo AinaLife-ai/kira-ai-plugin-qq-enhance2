@@ -56,7 +56,7 @@ class WakeScheduler:
         message_locator,
         wake_self_emoji: bool = True,
         wake_others_emoji: bool = False,
-        others_emoji_cooldown: int = 20,
+        wake_others_emoji_cooldown: int = 20,
         wake_profile_like: bool = True,
         wake_title: bool = True,
         wake_kicked: bool = True,
@@ -70,7 +70,7 @@ class WakeScheduler:
         self.message_locator = message_locator
         self.wake_self_emoji = wake_self_emoji
         self.wake_others_emoji = wake_others_emoji
-        self.others_emoji_cooldown = others_emoji_cooldown
+        self.wake_others_emoji_cooldown = wake_others_emoji_cooldown
         self.wake_profile_like = wake_profile_like
         self.wake_title = wake_title
         self.wake_kicked = wake_kicked
@@ -123,7 +123,7 @@ class WakeScheduler:
             # 他人贴表情：检查配置 + 冷却
             if self.wake_others_emoji:
                 last = self._others_emoji_wake_ts.get(event.sid, 0)
-                if now - last >= self.others_emoji_cooldown:
+                if now - last >= self.wake_others_emoji_cooldown:
                     return True
             return False
         return False
@@ -150,7 +150,7 @@ class WakeScheduler:
             if not self.wake_others_emoji:
                 return False
             last = self._others_emoji_wake_ts.get(event.sid, 0)
-            return (now - last) >= self.others_emoji_cooldown
+            return (now - last) >= self.wake_others_emoji_cooldown
 
         return False
 
