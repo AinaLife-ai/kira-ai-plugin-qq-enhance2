@@ -57,8 +57,8 @@ class QQProfileTool(BaseTool):
         event: KiraMessageBatchEvent,
         *args,
         user_id: str = "",
-        nickname: str = "",
-        personal_note: str = "",
+        nickname: str = None,
+        personal_note: str = None,
         sex: int = None,
         **kwargs,
     ) -> str:
@@ -67,9 +67,9 @@ class QQProfileTool(BaseTool):
         Args:
             event: 消息批次事件。
             user_id: 目标 QQ 号（不传=操作自己）。
-            nickname: 新昵称。
-            personal_note: 新个性签名。
-            sex: 新性别。
+            nickname: 新昵称。None=不修改（QQ 昵称不可为空）。
+            personal_note: 新个性签名。None=不修改；空字符串=清除签名。
+            sex: 新性别。None=不修改。
 
         Returns:
             操作结果文本。
@@ -87,10 +87,12 @@ class QQProfileTool(BaseTool):
 
         # 读写模式：操作自己
         # 构建修改字段
+        # 注意：nickname 传空字符串无意义（QQ 不允许空昵称），故只判断非空；
+        #      personal_note 允许空字符串（= 清除签名），故用 is not None
         update_fields = {}
         if nickname:
             update_fields["nickname"] = nickname
-        if personal_note:
+        if personal_note is not None:
             update_fields["personal_note"] = personal_note
         if sex is not None:
             update_fields["sex"] = int(sex)
@@ -180,14 +182,34 @@ class QQProfileTool(BaseTool):
 
             # 提示词对齐框架：留空则跟随框架 WebUI 设置（prompt=None → 框架默认提示词）
             custom_prompt = (self.avatar_desc_prompt or "").strip() or None
-            lang = "zh"
-            try:
-                lang = self.ctx.config.get_config("locale.lang", "zh") or "zh"
-            except Exception:
-                pass
+            lang = self._get_locale_lang()
 
             desc = await desc_img(client=vlm, image=img, prompt=custom_prompt, lang=lang)
             return (desc or "").strip()
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
             return ""
+
+    def _get_locale_lang(self) -> str:
+        """获取框架语言设置（兼容 config 为 dict 或 KiraConfig 对象两种情况）。"""
+        cfg = getattr(self.ctx, "config", None)
+        if cfg is None:
+            return "zh"
+        # KiraConfig 对象
+        getter = getattr(cfg, "get_config", None)
+        if callable(getter):
+            try:
+                return getter("locale.lang", "zh") or "zh"
+            except Exception:
+                pass
+        # dict
+        if isinstance(cfg, dict):
+            try:
+                val = cfg.get("locale", {})
+                if isinstance(val, dict):
+                    return val.get("lang") or "zh"
+                # 扁平 key 形式
+                return cfg.get("locale.lang") or "zh"
+            except Exception:
+                pass
+        return "zh"

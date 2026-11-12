@@ -140,12 +140,19 @@ def normalize_notice(
 
     # ---- 贴表情 ----
     if notice_type == "group_msg_emoji_like":
+        # is_add=False 表示"取消表情"（取消回应），不是贴表情
+        # SnowLuma 的 sub_type 为 "add"/"remove"，NapCat/LLOneBot 用 is_add 字段
+        is_add = raw.get("is_add", True)
+        if is_add is False or sub_type in ("remove", "del", "unlink"):
+            return None
         likes = raw.get("likes") or []
         emoji_ids = []
         total_count = 0
         for lk in likes:
             if isinstance(lk, dict):
-                emoji_ids.append(_s(lk.get("emoji_id")))
+                eid = _s(lk.get("emoji_id"))
+                if eid:
+                    emoji_ids.append(eid)
                 try:
                     total_count += int(lk.get("count") or 1)
                 except (TypeError, ValueError):
@@ -155,7 +162,7 @@ def normalize_notice(
             "message_seq": _s(raw.get("message_seq")),
             "emoji_ids": emoji_ids,
             "count": total_count or 1,
-            "is_add": bool(raw.get("is_add", True)),
+            "is_add": True,
             "sub_type": sub_type,
         }
         # 判定是否给自己贴：需 message_locator 反查（此处只做归一化，唤醒判定在 scheduler）

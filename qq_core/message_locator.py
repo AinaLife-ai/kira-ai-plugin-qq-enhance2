@@ -170,8 +170,13 @@ class MessageLocator:
             is_group: 是否群聊。
         """
         # 判定操作者身份（区分具体动作差别）
-        if operator == sender:
-            action_desc = "撤回了自己的一条消息"
+        # 注意：私聊撤回（friend_recall）可能没有 operator_id，回退到消息发送者
+        effective_operator = operator or sender
+        effective_operator_name = operator_name or ("" if operator else sender_name)
+
+        if not operator or operator == sender:
+            # 自己撤回 或 无操作者信息（私聊常见）
+            action_desc = "撤回了一条消息"
             role_prefix = ""
         else:
             # 检查是否是群主/管理员（需 get_group_member_info）
@@ -188,9 +193,9 @@ class MessageLocator:
 
         # 标注格式：用户{QQ}({昵称}){角色前缀} {动作}
         if role_prefix:
-            annotation = f"\n[已撤回｜{_fmt_user(operator, operator_name)}{role_prefix} {action_desc}]"
+            annotation = f"\n[已撤回｜{_fmt_user(effective_operator, effective_operator_name)}{role_prefix} {action_desc}]"
         else:
-            annotation = f"\n[已撤回｜{_fmt_user(operator, operator_name)} {action_desc}]"
+            annotation = f"\n[已撤回｜{_fmt_user(effective_operator, effective_operator_name)} {action_desc}]"
 
         async with self._lock:
             recall_list = self._recall_store.setdefault(sid, [])
@@ -244,10 +249,42 @@ class MessageLocator:
         async with self._lock:
             return list(self._recall_store.get(sid, []))
 
-    async def clear_recalls(self, sid: str):
-        """清空 sid 的撤回归档。"""
+    async def clear_recalls(self, sid: str, keep: set[str] | None = None):
+        """清理 sid 的撤回归档。
+
+        Args:
+            sid: 会话 ID。
+            keep: 要保留的 message_id 集合（已成功追加标注的）。
+                  None = 全部清空；空集合 = 也全部清空。
+                  注意：未匹配到原文的归档必须保留，否则标注永久丢失
+                  （被撤回消息可能不在本轮 prompt 里）。
+        """
         async with self._lock:
-            self._recall_store.pop(sid, None)
+            if not keep:
+                self._recall_store.pop(sid, None)
+                return
+            lst = self._recall_store.get(sid, [])
+            remain = [r for r in lst if r.get("message_id") not in keep]
+            if remain:
+                self._recall_store[sid] = remain
+            else:
+                self._recall_store.pop(sid, None)
+
+    async def prune_recalls(self, max_age_seconds: float = 600):
+        """清理过期撤回归档（默认 10 分钟）。
+
+        未匹配的归档会一直保留到过期——避免标注永久丢失，
+        同时防止无限增长。
+        """
+        cutoff = time.time() - max_age_seconds
+        async with self._lock:
+            for sid in list(self._recall_store.keys()):
+                lst = self._recall_store[sid]
+                remain = [r for r in lst if r.get("ts", 0) >= cutoff]
+                if remain:
+                    self._recall_store[sid] = remain
+                else:
+                    self._recall_store.pop(sid, None)
 
 
 def _fmt_user(qq: str, name: str) -> str:

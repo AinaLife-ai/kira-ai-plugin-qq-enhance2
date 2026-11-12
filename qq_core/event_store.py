@@ -119,11 +119,15 @@ class EventStore:
             self._dirty.add(sid)
 
     async def _persist_loop(self):
-        """定期落盘（30s 或满 50 条 dirty）。"""
+        """定期落盘（每 30s 写一次所有 dirty sid）。
+
+        注意：不能只在 dirty ≥ 50 时才写——那样少量会话的变化会永远不落盘
+        （重启后丢失）。dirty 非空即写，30s 节流足够（小文件、写入量低）。
+        """
         while True:
             try:
                 await asyncio.sleep(30)
-                if len(self._dirty) >= 50:
+                if self._dirty:
                     await self._persist_all()
             except asyncio.CancelledError:
                 break
@@ -219,6 +223,11 @@ class EventStore:
                 # 清理过期事件
                 cutoff = time.time() - self.ttl_seconds
                 ev_list = [ev for ev in ev_list if ev.ts >= cutoff]
+                # 应用 LRU 上限（磁盘遗留可能超过 max_events）
+                if len(ev_list) > self.max_events:
+                    # 保留最新的 max_events 条
+                    ev_list.sort(key=lambda e: e.ts)
+                    ev_list = ev_list[-self.max_events:]
                 if ev_list:
                     async with self._lock:
                         self._store[sid] = ev_list

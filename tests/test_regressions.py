@@ -126,26 +126,34 @@ def test_bug1_throttle_not_skip_rewrite():
 def test_bug2_self_emoji_judgement():
     """wake_self_emoji=False 时，自己的消息被贴表情仍应判定为"给自己"。"""
     src = Path(__file__).parent.parent.joinpath("main.py").read_text(encoding="utf-8")
-    # 关键：is_self_msg 不再 and wake_self_emoji
-    assert "is_self_msg = await self.wake_scheduler._is_self_message(qq_event)" in src, \
-        "自他判定应与开关解耦"
+    # 关键：自他判定只看 info["is_self"]，不与 wake_self_emoji 开关耦合
+    assert 'is_self_msg = bool(info.get("is_self", False)) if info else False' in src, \
+        "自他判定应只依赖 lookup 结果"
     assert "if self.wake_self_emoji and await self.wake_scheduler._is_self_message" not in src, \
         "自他判定不应被开关污染"
-    print("  ✓ Bug2 修复确认：自他判定与开关解耦")
+    # 且贴表情分支内 lookup 只调用一次（避免 _is_self_message 内外重复查询）
+    import re as _re
+    emoji_branch = _re.search(
+        r"if qq_event\.etype == E_EMOJI_LIKE:(.*?)\n        # 撤回事件", src, _re.S
+    )
+    assert emoji_branch, "未找到贴表情分支"
+    assert emoji_branch.group(1).count("locator.lookup") == 1, \
+        "贴表情分支内 lookup 应只调用一次"
+    print("  ✓ Bug2 修复确认：自他判定与开关解耦、lookup 单次")
 
 
 # ============ Bug 3: 每小时配额不双重计数 ============
 
 def test_bug3_no_double_counting():
-    """should_wake 只读判定，计数唯一发生在 _trigger_text。"""
+    """should_wake_now 只读判定，计数唯一发生在 _trigger_text。"""
     sched, ctx = _make_scheduler(wake_max_per_hour=2)
 
     ev = QQEvent(eid="e1", etype=E_EMOJI_LIKE, sid="napcat:gm:1", ts=int(time.time()),
                  actor="1001", extra={"message_id": "1", "emoji_ids": ["1"], "count": 1})
 
-    # should_wake 不应改变计数
-    _run(sched.should_wake(ev))
-    assert sched._hourly_wake_count == {}, f"should_wake 不应计数: {sched._hourly_wake_count}"
+    # should_wake_now 不应改变计数
+    assert sched.should_wake_now(ev) is False  # wake_others_emoji 默认关
+    assert sched._hourly_wake_count == {}, f"should_wake_now 不应计数: {sched._hourly_wake_count}"
 
     # _trigger_text 应计数
     _run(sched._trigger_text("napcat:gm:1", "test", "test"))

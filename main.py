@@ -132,8 +132,19 @@ class QQEnhance2Plugin(BasePlugin):
 
     async def terminate(self):
         """清理资源。"""
+        if self.wake_scheduler:
+            try:
+                await self.wake_scheduler.terminate()
+            except Exception as e:
+                logger.debug(f"[QQ增强2] 唤醒调度器清理异常: {e}")
         if self.store:
             await self.store.stop()
+        # 清空贴表情/撤回归档（模块级全局状态）
+        try:
+            from .qq_core.emoji_rewriter import _EMOJI_STORE
+            _EMOJI_STORE.clear()
+        except Exception:
+            pass
         logger.info("[QQ增强2] 已停止。")
 
     # ==================== 感知层：im_message 收集他人事件 ====================
@@ -213,9 +224,10 @@ class QQEnhance2Plugin(BasePlugin):
 
         if qq_event.etype == E_EMOJI_LIKE:
             # 贴表情：判断是给自己还是他人（与 wake_self_emoji 开关解耦——判定必须准确）
+            # 注意：lookup 只做一次，避免 _is_self_message 内外重复查询
             msg_id = qq_event.extra.get("message_id", "")
-            is_self_msg = await self.wake_scheduler._is_self_message(qq_event)
             info = await self.locator.lookup(msg_id, qq_event.sid) if msg_id else None
+            is_self_msg = bool(info.get("is_self", False)) if info else False
             msg_author = info.get("sender", "") if info else ""
             msg_author_name = info.get("sender_name", "") if info else ""
             msg_excerpt = info.get("text", "")[:20] if info else ""

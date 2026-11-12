@@ -12,9 +12,19 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from core.logging_manager import get_logger
-from core.provider import LLMRequest
-from core.prompt_manager import Prompt
+try:
+    from core.logging_manager import get_logger
+    from core.provider import LLMRequest
+    from core.prompt_manager import Prompt
+except ImportError:  # 独立测试环境（无框架）
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+    def get_logger(*a, **k):
+        return _Logger()
+    LLMRequest = object
+    Prompt = object
 
 from .message_locator import MessageLocator
 
@@ -55,6 +65,7 @@ class RecallRewriter:
             return
 
         # 遍历 user_prompt 中 name=="message" 的 Prompt
+        handled_ids: set[str] = set()  # 已成功追加标注的 message_id
         for p in req.user_prompt:
             if not isinstance(p, Prompt):
                 continue
@@ -89,13 +100,19 @@ class RecallRewriter:
 
                 # 检查是否已追加（幂等）
                 if annotation in p.content:
+                    handled_ids.add(recall_info.get("message_id", ""))
                     continue
                 if recall_info.get("annotation", "") in p.content:
+                    handled_ids.add(recall_info.get("message_id", ""))
                     continue
 
                 # 追加撤回标注
                 p.content += annotation
+                handled_ids.add(recall_info.get("message_id", ""))
                 logger.debug(f"[QQ增强2] 撤回标注已追加: sid={sid}, message_id={recall_info.get('message_id')}")
 
-        # 清空已处理的撤回归档（避免重复改写）
-        await self.locator.clear_recalls(sid)
+        # 只清空已成功处理的归档（未匹配的保留，等下一轮或过期清理）
+        # 注意：不能无条件全清——被撤回消息可能不在本轮 prompt 里，
+        # 全清会导致标注永久丢失
+        if handled_ids:
+            await self.locator.clear_recalls(sid, keep=handled_ids)

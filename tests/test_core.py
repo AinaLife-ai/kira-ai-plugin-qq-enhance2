@@ -43,8 +43,44 @@ def _install_framework_stubs():
     core.logging_manager = logging_manager
 
     chat = types.ModuleType("core.chat")
+    chat.__path__ = []  # 使其可作为 package，支持 core.chat.message_utils 子模块
     sys.modules["core.chat"] = chat
     core.chat = chat
+
+    # KiraMessageEvent / KiraIMMessage / MessageChain / Text 最小实现（先定义，供各子模块引用）
+    class _Chain:
+        def __init__(self, elements=None):
+            self.message_list = elements or []
+    class _IMMessage:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+    class _MessageEvent:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+            self.session = None
+            self._is_stopped = False
+            self._process_strategy = "discard"
+        def trigger(self, force=False):
+            self._process_strategy = "trigger"
+            return True
+        def discard(self, force=False):
+            self._process_strategy = "discard"
+            return True
+        def is_group_message(self):
+            return getattr(getattr(self, "message", None), "group", None) is not None
+
+    # core.chat.message_utils（工具需要 KiraMessageBatchEvent）
+    msg_utils = types.ModuleType("core.chat.message_utils")
+    class _BatchEvent:
+        def __init__(self, *a, **kw):
+            self.__dict__.update(kw)
+        def is_group_message(self):
+            return True
+    msg_utils.KiraMessageBatchEvent = _BatchEvent
+    msg_utils.KiraMessageEvent = _MessageEvent
+    msg_utils.KiraIMMessage = _IMMessage
+    sys.modules["core.chat.message_utils"] = msg_utils
+    chat.message_utils = msg_utils
 
     chat_session = types.ModuleType("core.chat.session")
     class Session:
@@ -104,15 +140,72 @@ def _install_framework_stubs():
 
     # message_elements.Text（_trigger_text 需要）
     msg_elements = types.ModuleType("core.chat.message_elements")
+    msg_elements.__path__ = []
     class _Text:
         def __init__(self, text=""):
             self.text = text
         @property
         def repr(self):
             return self.text
+    class _Image:
+        def __init__(self, image="", **kw):
+            self.image = image
+            self.caption = None
+        async def to_data_url(self):
+            return ""
+        async def hash_image(self):
+            return ""
     msg_elements.Text = _Text
+    msg_elements.Image = _Image
     sys.modules["core.chat.message_elements"] = msg_elements
     chat.message_elements = msg_elements
+
+    # core.plugin.PluginContext
+    plugin_pkg = types.ModuleType("core.plugin")
+    plugin_pkg.__path__ = []
+    class _PluginContext:
+        pass
+    plugin_pkg.PluginContext = _PluginContext
+    sys.modules["core.plugin"] = plugin_pkg
+
+    # core.utils.tool_utils.BaseTool（工具基类）
+    utils_pkg = types.ModuleType("core.utils")
+    utils_pkg.__path__ = []
+    sys.modules["core.utils"] = utils_pkg
+    tool_utils = types.ModuleType("core.utils.tool_utils")
+    class _BaseTool:
+        name = ""
+        description = ""
+        parameters = {}
+        def __init__(self, *a, ctx=None, **kw):
+            self.ctx = ctx
+        async def execute(self, event, *a, **kw):
+            return ""
+    tool_utils.BaseTool = _BaseTool
+    sys.modules["core.utils.tool_utils"] = tool_utils
+    utils_pkg.tool_utils = tool_utils
+
+    # core.provider.LLMRequest / core.prompt_manager.Prompt（recall/emoji rewriter 需要）
+    provider_mod = types.ModuleType("core.provider")
+    class _LLMRequest:
+        def __init__(self, *a, **kw):
+            self.user_prompt = []
+            self.messages = []
+    provider_mod.LLMRequest = _LLMRequest
+    sys.modules["core.provider"] = provider_mod
+
+    prompt_mod = types.ModuleType("core.prompt_manager")
+    class _Prompt:
+        def __init__(self, content="", name=None, source=None, end="\n", persist=True, **kw):
+            self.content = content
+            self.name = name
+            self.source = source
+            self.end = end
+            self.persist = persist
+        def to_string(self):
+            return self.content + (self.end or "")
+    prompt_mod.Prompt = _Prompt
+    sys.modules["core.prompt_manager"] = prompt_mod
 
 _install_framework_stubs()
 

@@ -87,11 +87,14 @@ def archive_emoji_like(
     # 同一 message_id 合并标注（多条贴表情合并为一条）
     for item in store:
         if item["message_id"] == message_id:
-            # 合并：同一贴的人只累加次数，不同贴的人追加条目
+            # 合并：同一贴的人累加次数 + 合并表情 ID（去重保序）
             merged = False
             for sub in item["sub_entries"]:
                 if sub["operator"] == operator:
                     sub["count"] += count
+                    for e in emoji_ids:
+                        if e and e not in sub["emoji_ids"]:
+                            sub["emoji_ids"].append(e)
                     merged = True
                     break
             if not merged:
@@ -145,7 +148,7 @@ async def rewrite_emoji_like(
     if not store:
         return
 
-    rewritten = 0
+    rewritten_ids: set[str] = set()  # 已成功追加标注的 message_id
     for p in req.user_prompt:
         if not isinstance(p, Prompt):
             continue
@@ -158,23 +161,50 @@ async def rewrite_emoji_like(
             original_text = item.get("text", "")
             if not original_text:
                 continue
-            # 模糊匹配：前 50 字
+            # 模糊匹配：前 50 字（并要求唯一命中，避免相似消息误伤）
             match_key = original_text[:50] if len(original_text) >= 50 else original_text
             if match_key not in p.content:
                 continue
+            if p.content.count(match_key) > 1:
+                logger.debug(f"[QQ增强2] 贴表情原文匹配到多处，跳过: {match_key[:20]}")
+                continue
             # 幂等：检查是否已追加
             annotation = item.get("annotation", "")
+            mid = item.get("message_id", "")
             if annotation in p.content:
+                rewritten_ids.add(mid)
                 continue
             p.content += annotation
-            rewritten += 1
-            logger.debug(f"[QQ增强2] 贴表情标注已追加: sid={sid}, message_id={item.get('message_id')}")
+            rewritten_ids.add(mid)
+            logger.debug(f"[QQ增强2] 贴表情标注已追加: sid={sid}, message_id={mid}")
 
-    # 清空已处理的归档（避免重复改写）
-    if rewritten:
-        _EMOJI_STORE.pop(sid, None)
+    # 只移除已成功处理的归档（未匹配的保留，避免标注永久丢失）
+    if rewritten_ids:
+        remain = [
+            it for it in store
+            if it.get("message_id") not in rewritten_ids
+        ]
+        if remain:
+            _EMOJI_STORE[sid] = remain
+        else:
+            _EMOJI_STORE.pop(sid, None)
 
 
 def clear_emoji_archive(sid: str):
     """清空 sid 的贴表情归档。"""
     _EMOJI_STORE.pop(sid, None)
+
+
+def prune_emoji_archive(max_age_seconds: float = 600):
+    """清理过期贴表情归档（默认 10 分钟）。
+
+    未匹配的归档会保留到过期，避免标注永久丢失，同时防止无限增长。
+    """
+    cutoff = time.time() - max_age_seconds
+    for sid in list(_EMOJI_STORE.keys()):
+        lst = _EMOJI_STORE[sid]
+        remain = [it for it in lst if it.get("ts", 0) >= cutoff]
+        if remain:
+            _EMOJI_STORE[sid] = remain
+        else:
+            _EMOJI_STORE.pop(sid, None)

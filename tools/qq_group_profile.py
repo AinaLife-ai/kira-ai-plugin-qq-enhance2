@@ -54,8 +54,8 @@ class QQGroupProfileTool(BaseTool):
         event: KiraMessageBatchEvent,
         *args,
         user_id: str = "",
-        card: str = "",
-        title: str = "",
+        card: str = None,
+        title: str = None,
         title_duration: int = -1,
         **kwargs,
     ) -> str:
@@ -64,9 +64,9 @@ class QQGroupProfileTool(BaseTool):
         Args:
             event: 消息批次事件。
             user_id: 目标 QQ 号（不传=操作自己）。
-            card: 新群名片。
-            title: 新群头衔。
-            title_duration: 头衔有效时长。
+            card: 新群名片。None=不修改；空字符串=清除群名片。
+            title: 新头衔。None=不修改；空字符串=清除头衔。
+            title_duration: 头衔有效时长（-1=永久）。
 
         Returns:
             操作结果文本。
@@ -87,11 +87,12 @@ class QQGroupProfileTool(BaseTool):
             return await self._query_member(group_id, target)
 
         # 读写模式：操作自己
+        # 注意：card/title 默认为 None（不修改），传空字符串表示"清除"
         update_fields = {}
-        if card is not None and card != "":
-            update_fields["card"] = card
-        if title is not None and title != "":
-            update_fields["title"] = title
+        if card is not None:
+            update_fields["card"] = card          # 含空字符串（清除）
+        if title is not None:
+            update_fields["title"] = title        # 含空字符串（清除）
             if title_duration != -1:
                 update_fields["duration"] = title_duration
 

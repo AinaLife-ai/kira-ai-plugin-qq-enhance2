@@ -81,6 +81,8 @@ class WakeScheduler:
 
         # 点赞累加器：sid → {operator: {count, first_ts, last_ts}}
         self._like_accumulator: dict[str, dict[str, dict]] = {}
+        # 点赞结算定时器：(sid, operator) → Task（debounce，每次点赞重置）
+        self._like_settle_tasks: dict[tuple[str, str], asyncio.Task] = {}
         # 每小时唤醒计数：sid → {hour_bucket: count}
         self._hourly_wake_count: dict[str, dict[int, int]] = {}
         # 他人贴表情唤醒冷却：sid → 上次唤醒时间
@@ -88,49 +90,6 @@ class WakeScheduler:
         # anti-harass 屏蔽名单缓存：{qq: expire_ts}
         self._harass_blocklist: dict[str, float] = {}
         self._last_blocklist_load: float = 0.0
-
-    async def should_wake(self, event: QQEvent) -> bool:
-        """判断是否应该唤醒（trigger）。
-
-        Args:
-            event: 归一化后的事件。
-
-        Returns:
-            True = 应该唤醒；False = 不唤醒（只入 store）。
-        """
-        now = time.time()
-
-        # 静默时段检查
-        if self._in_quiet_hours(now):
-            return False
-
-        # 每小时上限（只读判定，不计数；计数统一在 _trigger_text 收口）
-        if self.wake_max_per_hour != -1:
-            hour_bucket = int(now // 3600)
-            used = self._hourly_wake_count.get(event.sid, {}).get(hour_bucket, 0)
-            if used >= self.wake_max_per_hour:
-                return False
-
-        # 按事件类型判定
-        if event.etype == E_EMOJI_LIKE_SELF:
-            return self.wake_self_emoji
-        elif event.etype == E_PROFILE_LIKE_SELF:
-            return self.wake_profile_like
-        elif event.etype == E_TITLE_SELF:
-            return self.wake_title
-        elif event.etype == E_KICKED_SELF:
-            return self.wake_kicked
-        elif event.etype == E_EMOJI_LIKE:
-            # 贴表情：先判断是否给自己贴
-            if self.wake_self_emoji and await self._is_self_message(event):
-                return True
-            # 他人贴表情：检查配置 + 冷却
-            if self.wake_others_emoji:
-                last = self._others_emoji_wake_ts.get(event.sid, 0)
-                if now - last >= self.wake_others_emoji_cooldown:
-                    return True
-            return False
-        return False
 
     def should_wake_now(self, event: QQEvent) -> bool:
         """同步版唤醒判定（不递增每小时计数，仅供事件处理时快速判断）。
@@ -259,11 +218,17 @@ class WakeScheduler:
     async def on_profile_like(self, event: QQEvent) -> bool:
         """处理资料卡点赞事件（合并防抖）。
 
+        合并窗口语义：同一用户对资料卡的连续点赞在
+        profile_like_merge_window_seconds 内合并为一条唤醒。
+
+        结算时机（关键）：窗口内最后一次点赞后，必须启动一个定时器在
+        窗口结束时结算——否则"只点一次就走"的场景永远收不到唤醒。
+
         Args:
             event: 点赞事件。
 
         Returns:
-            True = 触发唤醒；False = 合并累加，不唤醒。
+            True = 触发唤醒；False = 合并累加（等待窗口结束结算）。
         """
         if not self.wake_profile_like:
             return False
@@ -272,24 +237,60 @@ class WakeScheduler:
         operator = event.actor
         now = time.time()
 
-        acc = self._like_accumulator.setdefault(sid, {}).get(operator)
+        acc = self._like_accumulator.get(sid, {}).get(operator)
         if acc and (now - acc["last_ts"]) <= self.profile_like_merge_window_seconds:
-            # 合并窗口内：累加
+            # 合并窗口内：累加并顺延结算定时器
             acc["count"] += event.extra.get("times", 1)
             acc["last_ts"] = now
-            return False  # 不 trigger
+            self._schedule_like_settle(sid, operator)
+            return False
 
-        # 新窗口：trigger 之前的累计（如果有）
+        # 新窗口：先结算上一个窗口（如果还有未结算的）
         if acc and acc["count"] > 0:
-            await self._trigger_like_summary(sid, operator, acc["count"], now - acc["first_ts"])
+            await self._settle_like(sid, operator)
 
-        # 开始新累计
-        self._like_accumulator[sid][operator] = {
+        # 开始新累计 + 启动结算定时器
+        self._like_accumulator.setdefault(sid, {})[operator] = {
             "count": event.extra.get("times", 1),
             "first_ts": now,
             "last_ts": now,
         }
-        return False  # 本次不 trigger，等窗口结束或下次点赞
+        self._schedule_like_settle(sid, operator)
+        return False
+
+    def _schedule_like_settle(self, sid: str, operator: str):
+        """（重）调度点赞结算定时器：窗口结束后结算。
+
+        每次点赞都重置定时器（debounce），保证"最后一次点赞后 N 秒"才结算。
+        """
+        key = (sid, operator)
+        old = self._like_settle_tasks.pop(key, None)
+        if old and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._like_settle_after(sid, operator))
+        self._like_settle_tasks[key] = task
+
+    async def _like_settle_after(self, sid: str, operator: str):
+        """等待合并窗口结束后结算点赞。"""
+        try:
+            await asyncio.sleep(self.profile_like_merge_window_seconds)
+        except asyncio.CancelledError:
+            return
+        self._like_settle_tasks.pop((sid, operator), None)
+        await self._settle_like(sid, operator)
+
+    async def _settle_like(self, sid: str, operator: str):
+        """结算某个用户的点赞累计（触发一次唤醒并清空）。"""
+        acc = self._like_accumulator.get(sid, {}).get(operator)
+        if not acc or acc["count"] <= 0:
+            return
+        count = acc["count"]
+        duration = max(time.time() - acc["first_ts"], 1.0)
+        # 先清空再触发，避免重入
+        self._like_accumulator[sid].pop(operator, None)
+        if not self._like_accumulator[sid]:
+            self._like_accumulator.pop(sid, None)
+        await self._trigger_like_summary(sid, operator, count, duration)
 
     async def _trigger_like_summary(self, sid: str, operator: str, count: int, duration: float):
         """触发点赞汇总唤醒。
@@ -502,3 +503,18 @@ class WakeScheduler:
         except Exception:
             pass
         return ""
+
+    async def terminate(self):
+        """清理：取消所有待结算的点赞定时器（防任务泄漏）。
+
+        注意：不结算未完成的点赞累计——插件卸载时不应该再触发唤醒。
+        """
+        tasks = list(self._like_settle_tasks.values())
+        self._like_settle_tasks.clear()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # 等待取消完成（忽略异常）
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._like_accumulator.clear()

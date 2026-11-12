@@ -67,11 +67,15 @@ def render_env_summary(
     if not events:
         return ""
 
-    # 拼接候选文本（类型条目用 ①②③ 编号，分隔符用 ；）
     header = _time_prefix(events)
 
     def _assemble(evts: list[QQEvent]) -> str:
-        """按当前事件集合渲染（无编号，用；分隔，省 token）。"""
+        """按当前事件集合渲染（无编号，用；分隔以省 token）。
+
+        注意：max_per_type 截断对"可合并类型"（poke/emoji_like）无效——
+        先合并再截断会丢事件（8 条戳一戳取 6 条合并 = 漏 2 条），
+        所以这些类型传入全部事件，由渲染函数内部决定显示粒度。
+        """
         by_t: dict[str, list[QQEvent]] = {}
         for ev in evts:
             by_t.setdefault(ev.etype, []).append(ev)
@@ -82,9 +86,12 @@ def render_env_summary(
             key=lambda et: by_t[et][0].ts if by_t[et] else 0,
             reverse=True,
         )
+        # 合并型类型：渲染函数内部会归并，传全量避免丢事件
+        merge_types = {E_POKE, E_EMOJI_LIKE}
         parts = []
         for et in order:
-            rendered = _render_type(et, by_t[et][:max_per_type])
+            subset = by_t[et] if et in merge_types else by_t[et][:max_per_type]
+            rendered = _render_type(et, subset, all_events=evts)
             if rendered:
                 parts.append(rendered)
         if not parts:
@@ -95,29 +102,62 @@ def render_env_summary(
     candidate = _assemble(events)
 
     # 踢旧淘汰：超限从最旧事件整条删除（不是截断字符串）
+    # 至少保留 1 条（即使超限也返回，避免空摘要）
     while len(candidate) > max_chars and len(events) > 1:
         events = events[1:]
         candidate = _assemble(events)
 
-    return candidate if len(candidate) <= max_chars or len(events) == 1 else candidate
+    return candidate
 
 
-def _render_type(etype: str, events: list[QQEvent]) -> str:
-    """渲染单个类型的事件（已排序，新事件在前）。"""
+def _render_type(etype: str, events: list[QQEvent], all_events: list[QQEvent] | None = None) -> str:
+    """渲染单个类型的事件（已排序，新事件在前）。
+
+    Args:
+        etype: 事件类型。
+        events: 该类型的事件（已排序、已截断到 max_per_type）。
+        all_events: 全量事件（用于跨类型配对，如 ban ↔ unban）。
+    """
+    all_events = all_events if all_events is not None else events
     if etype == E_POKE:
-        # 合并：同 actor → 同 target 的 N 次 poke 合并为 ×N
-        pairs = {}
+        # 合并策略（省 token）：
+        # 1. 同 actor → 同 target 的 N 次 → ×N
+        # 2. 多 actor → 同 target → 合并为 "A、B、C 戳了戳 T"
+        pair_count: dict[tuple[str, str], int] = {}
+        actor_names: dict[str, str] = {}
+        target_names: dict[str, str] = {}
         for ev in events:
             key = (ev.actor, ev.target)
-            pairs[key] = pairs.get(key, 0) + 1
+            pair_count[key] = pair_count.get(key, 0) + 1
+            if ev.actor:
+                actor_names[ev.actor] = ev.actor_name
+            if ev.target:
+                target_names[ev.target] = ev.target_name
+
+        # 按 target 归并
+        by_target: dict[str, list[tuple[str, int]]] = {}
+        for (actor, target), cnt in pair_count.items():
+            by_target.setdefault(target, []).append((actor, cnt))
+
         parts = []
-        for (actor, target), count in pairs.items():
-            ev = next((e for e in events if e.actor == actor and e.target == target), None)
-            aname = ev.actor_name if ev else ""
-            tname = ev.target_name if ev else ""
-            part = f"{_fmt_user(actor, aname)} 戳了戳 {_fmt_user(target, tname)}"
-            if count > 1:
-                part += f"×{count}"
+        for target, lst in by_target.items():
+            tname = target_names.get(target, "")
+            total = sum(c for _, c in lst)
+            if len(lst) == 1:
+                actor, cnt = lst[0]
+                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} 戳了戳 {_fmt_user(target, tname)}"
+                if cnt > 1:
+                    part += f"×{cnt}"
+            else:
+                # 多人戳同一人：列出前 3 个 + "等N人"
+                names = [
+                    _fmt_user(a, actor_names.get(a, ""))
+                    for a, _ in lst[:3]
+                ]
+                more = f"等{len(lst)}人" if len(lst) > 3 else ""
+                part = f"{'、'.join(names)}{more} 戳了戳 {_fmt_user(target, tname)}"
+                if total > len(lst):
+                    part += f"（共{total}次）"
             parts.append(part)
         return "；".join(parts)
 
@@ -138,17 +178,47 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
         return "；".join(parts)
 
     elif etype == E_BAN:
-        # 合并：同 target 的 N 次 ban 合并
+        # 禁言渲染：与同 target 的解除禁言事件配对
+        # - 已解除 → 显示时长 + (已解除)
+        # - 未解除且未到期 → 显示 (仍禁言中，剩约N分钟)
+        # - 已自然到期 → 显示 (禁言时长已过)
+        unban_by_target: dict[str, list[QQEvent]] = {}
+        for ev in all_events:
+            if ev.etype == E_UNBAN and ev.target:
+                unban_by_target.setdefault(ev.target, []).append(ev)
+
         parts = []
+        now = time.time()
         for ev in events:
-            duration = ev.extra.get("duration", 0)
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言 {duration}秒"
+            duration = ev.extra.get("duration", 0) or 0
+            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
+            if duration > 0:
+                part += f" {duration}秒"
+            # 配对解除事件（同 target，时间晚于本次 ban）
+            unban = next(
+                (u for u in unban_by_target.get(ev.target, []) if u.ts >= ev.ts),
+                None,
+            )
+            if unban:
+                part += "(已解除)"
+            elif duration > 0:
+                remain = int(duration - (now - ev.ts))
+                if remain > 0:
+                    part += f"(仍禁言中，剩约{remain // 60 + 1}分钟)"
+                else:
+                    part += "(禁言时长已过)"
             parts.append(part)
         return "；".join(parts)
 
     elif etype == E_UNBAN:
+        # 解除禁言：若已作为某个 ban 的配对显示，这里跳过（避免重复）
+        ban_targets = {
+            ev.target for ev in all_events if ev.etype == E_BAN and ev.target
+        }
         parts = []
         for ev in events:
+            if ev.target in ban_targets:
+                continue  # 已由 E_BAN 分支配对显示
             part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
             parts.append(part)
         return "；".join(parts)

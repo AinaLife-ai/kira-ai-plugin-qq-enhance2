@@ -1,11 +1,3 @@
-"""贴表情标注改写 + 撤回改写测试。
-
-验证：
-1. archive_emoji_like 归档与合并。
-2. rewrite_emoji_like 在 Prompt 后追加标注（幂等）。
-3. 缓存不受破坏（persist=False）。
-"""
-
 import sys
 import time
 import asyncio
@@ -15,18 +7,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qq_core.emoji_rewriter import archive_emoji_like, rewrite_emoji_like, clear_emoji_archive, _EMOJI_STORE
 from qq_core.emoji_dict import get_emoji_name
-
-
-class MockPrompt:
-    def __init__(self, content, name=None, source=None, end="\n", persist=True):
-        self.content = content
-        self.name = name
-        self.source = source
-        self.end = end
-        self.persist = persist
-
-    def to_string(self):
-        return self.content + self.end
+# 使用框架真实 Prompt（conftest 装的 stub 提供），
+# 确保 rewrite 内的 isinstance(p, Prompt) 成立
+from core.prompt_manager import Prompt as MockPrompt
 
 
 class MockReq:
@@ -35,7 +18,6 @@ class MockReq:
 
 
 def _run(coro):
-    """同步运行协程（兼容无事件循环环境）。"""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -49,6 +31,7 @@ def _run(coro):
 def test_archive_and_merge():
     """归档与合并测试。"""
     clear_emoji_archive("test:sid")
+    _EMOJI_STORE.clear()
     archive_emoji_like(
         sid="test:sid",
         message_id="12345",
@@ -79,8 +62,7 @@ def test_archive_and_merge():
 
 def test_rewrite():
     """改写测试。"""
-    clear_emoji_like()
-    clear_emoji_archive("test:sid2")
+    _EMOJI_STORE.clear()
     archive_emoji_like(
         sid="test:sid2",
         message_id="67890",
@@ -97,7 +79,6 @@ def test_rewrite():
         MockPrompt("另一条消息", name="message", source="system"),
     ])
 
-    import asyncio
     _run(rewrite_emoji_like(sid="test:sid2", req=req, enabled=True))
 
     # 第一条消息应追加标注
@@ -108,8 +89,7 @@ def test_rewrite():
 
 def test_idempotent():
     """幂等测试：同一归档不重复追加。"""
-    clear_emoji_like()
-    clear_emoji_archive("test:sid3")
+    _EMOJI_STORE.clear()
     archive_emoji_like(
         sid="test:sid3",
         message_id="11111",
@@ -123,7 +103,6 @@ def test_idempotent():
 
     req = MockReq([MockPrompt("幂等测试消息", name="message", source="system")])
 
-    import asyncio
     _run(rewrite_emoji_like(sid="test:sid3", req=req, enabled=True))
     first_content = req.user_prompt[0].content
 
@@ -134,9 +113,7 @@ def test_idempotent():
 
 def test_emoji_dict():
     """表情字典测试。"""
-    # 未加载时返回原 ID
     name = get_emoji_name("128077")
-    # 有映射则返回中文名，无则返回原 ID
     assert name == "128077" or len(name) > 0
 
 
