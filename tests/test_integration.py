@@ -38,7 +38,10 @@ async def test_plugin_load():
     # 验证 manifest 字段
     assert manifest.get("plugin_id") == "kira-ai-plugin-qq-enhance2"
     assert manifest.get("display_name") == "QQ增强2"
-    assert manifest.get("version") == "1.0.0"
+    # 版本号按语义化版本校验（不硬编码具体值，避免每次升版都要改测试）
+    import re as _re
+    ver = manifest.get("version", "")
+    assert _re.fullmatch(r"\d+\.\d+\.\d+", ver), f"版本号格式不合法: {ver}"
     assert manifest.get("author") == "znq19"
     assert manifest.get("core_version") == ">=3.1.2"
     assert manifest.get("icon") == "icon.png"

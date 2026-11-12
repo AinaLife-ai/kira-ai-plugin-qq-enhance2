@@ -53,7 +53,7 @@ async def build_plugin(adapter):
     context.tool_mgr = None
     context.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: adapter),
-        "get_all_adapters": staticmethod(lambda: [adapter]),
+        "get_adapters": staticmethod(lambda: {adapter.info.name: adapter}),
     })()
     context.event_bus = type("EB", (), {"publish": staticmethod(lambda e: asyncio.sleep(0))})()
     context.provider_mgr = None

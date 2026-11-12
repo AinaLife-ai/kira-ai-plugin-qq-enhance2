@@ -168,7 +168,7 @@ async def test_plugin_flow():
     context.tool_mgr = None
     context.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: adapter),
-        "get_all_adapters": staticmethod(lambda: [adapter]),
+        "get_adapters": staticmethod(lambda: {adapter.info.name: adapter}),
     })()
     context.event_bus = type("EB", (), {
         "publish": staticmethod(lambda e: asyncio.sleep(0)),
@@ -269,7 +269,7 @@ async def test_recall_flow():
     context.tool_mgr = None
     context.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: adapter),
-        "get_all_adapters": staticmethod(lambda: [adapter]),
+        "get_adapters": staticmethod(lambda: {adapter.info.name: adapter}),
     })()
     context.event_bus = type("EB", (), {
         "publish": staticmethod(lambda e: asyncio.sleep(0)),
@@ -365,7 +365,7 @@ async def test_tool_inject():
     context.tool_mgr = None
     context.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: adapter),
-        "get_all_adapters": staticmethod(lambda: [adapter]),
+        "get_adapters": staticmethod(lambda: {adapter.info.name: adapter}),
     })()
     context.event_bus = type("EB", (), {
         "publish": staticmethod(lambda e: asyncio.sleep(0)),
