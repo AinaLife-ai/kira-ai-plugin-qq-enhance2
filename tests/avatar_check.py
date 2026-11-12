@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import os as _os
 import sys
 from pathlib import Path
 
@@ -56,22 +57,47 @@ cases = [
     ("data:image/png;base64,iVBOR", "data:image/png;base64,iVBOR", "Data URL"),
     ("file:///data/avatar.png", "file:///data/avatar.png", "file:// URL"),
     ("/data/avatar.png", "/data/avatar.png", "绝对路径"),
-    ("./avatar.png", "./avatar.png", "相对路径"),
+    ("./avatar.png", _os.path.abspath("./avatar.png"), "相对路径→绝对路径"),
     ("A" * 200, "base64://" + "A" * 200, "纯 base64（200字符）"),
 ]
 for inp, exp, desc in cases:
     got = normalize_file_uri(inp)
     check(f"归一化: {desc}", got == exp, f"{inp[:20]!r} -> {got[:30]!r}")
 
-check("短字符串不当 base64", normalize_file_uri("avatar.png") == "avatar.png")
-check("64 位以下 base64 字符不转换", normalize_file_uri("abc123") == "abc123")
+check("短字符串不当 base64", normalize_file_uri("avatar.png") == _os.path.abspath("avatar.png"))
+check("64 位以下 base64 字符不转换",
+      not normalize_file_uri("abc123").startswith("base64://"))
 
+
+print("\n=== 1b. 本地路径 → 协议端可用 uri ===")
+from qq_core.fmt import file_to_protocol_uri
+import tempfile as _tf
+
+_tmp = _tf.NamedTemporaryFile(suffix=".png", delete=False)
+_tmp.write(b"\x89PNG\r\n\x1a\n" + b"0" * 100)
+_tmp.close()
+
+uri, err = file_to_protocol_uri(_tmp.name)
+check("存在的本地文件 → base64://", uri.startswith("base64://") and not err, (uri[:30], err))
+check("base64 内容原样可用", len(uri) > 100)
+
+uri2, err2 = file_to_protocol_uri(_tmp.name + ".missing")
+check("不存在的文件 → 明确错误", bool(err2) and "不存在" in err2, err2)
+check("错误时仍返回绝对路径", uri2.endswith(".missing"), uri2)
+
+uri3, err3 = file_to_protocol_uri("https://a.com/x.png")
+check("URL 原样返回", uri3 == "https://a.com/x.png" and not err3)
+
+uri4, err4 = file_to_protocol_uri("")
+check("空输入安全", uri4 == "" and not err4)
+
+_os.unlink(_tmp.name)
 
 print("\n=== 2. set_qq_avatar 调用格式 ===")
 src = Path(__file__).parent.parent.joinpath("tools", "qq_profile.py").read_text(encoding="utf-8")
 check("调用 set_qq_avatar", '"set_qq_avatar"' in src)
 check("参数名是 file（协议端规范）", '"file": avatar_file' in src)
-check("使用归一化后的值", "_normalize_file_uri(avatar)" in src)
+check("使用归一化后的值", "_prepare_file(avatar_raw)" in src or "_normalize_file_uri(avatar_raw)" in src)
 
 
 print("\n=== 3. 群头像调用格式 ===")
@@ -225,6 +251,42 @@ fout = run(e2e_fail())
 print(f"  失败输出: {fout}")
 check("失败返回明确提示", "失败" in fout and "权限不足" in fout, fout)
 
+
+print("\n=== 10. 头像描述缓存（同一 URL 10 分钟内只调一次 VLM）===")
+
+async def e2e_desc_cache():
+    import core.utils.common_utils as cu
+    calls = {"n": 0}
+
+    async def fake_desc_img(client=None, image=None, prompt=None, lang=None):
+        calls["n"] += 1
+        return "一个卡通头像"
+
+    orig = cu.desc_img
+    cu.desc_img = fake_desc_img
+    try:
+        class CtxVLM:
+            class provider_mgr:
+                @staticmethod
+                def get_default_vlm():
+                    return object()
+            config = {"locale": {"lang": "zh"}}
+
+        adapter, _q, _c = make_real_adapter()
+        tool = QQProfileTool(ctx=CtxVLM(), adapter=adapter, self_id="100")
+        from tools.qq_profile import _AVATAR_DESC_CACHE
+        _AVATAR_DESC_CACHE.clear()
+        url = "https://q1.qlogo.cn/g?b=qq&nk=10001&s=640"
+        d1 = await tool._describe_avatar(url)
+        d2 = await tool._describe_avatar(url)
+        return calls["n"], d1, d2
+    finally:
+        cu.desc_img = orig
+
+n, d1, d2 = run(e2e_desc_cache())
+print(f"  VLM 调用次数: {n}；描述: {d1!r}")
+check("同一 URL 只调 1 次 VLM", n == 1, n)
+check("两次结果一致且非空", d1 == d2 and bool(d1), (d1, d2))
 
 print("\n" + "=" * 60)
 print(f"头像功能审计: {len(PASS)} 通过, {len(FAIL)} 失败")

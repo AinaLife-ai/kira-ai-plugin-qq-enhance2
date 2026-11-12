@@ -292,6 +292,31 @@ async def main():
     finally:
         await inst.terminate()
 
+    print("\n=== 13. resolve_nickname 开关 ===")
+    from qq_core.env_renderer import render_env_summary
+
+    adapter, _ = fresh_adapter()
+    inst, _pub, _ = await build_plugin(adapter, overrides={"resolve_nickname": False})
+    try:
+        await feed(adapter, inst, make_poke(1001, 1002, GID, SELF))
+        evs = await inst.store.get_events(SID)
+        check("关闭后不补昵称", bool(evs) and not evs[0].target_name,
+              evs[0].target_name if evs else "no event")
+        text = render_env_summary(evs) if evs else ""
+        check("渲染只有 QQ 号（无昵称括号）", "(李四)" not in text and "用户1002" in text, text)
+    finally:
+        await inst.terminate()
+
+    adapter, _ = fresh_adapter()
+    inst, _pub, _ = await build_plugin(adapter, overrides={"resolve_nickname": True})
+    try:
+        await feed(adapter, inst, make_poke(1001, 1002, GID, SELF))
+        evs = await inst.store.get_events(SID)
+        check("开启后补全昵称", bool(evs) and bool(evs[0].target_name),
+              evs[0].target_name if evs else "no event")
+    finally:
+        await inst.terminate()
+
     print("\n" + "=" * 60)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:

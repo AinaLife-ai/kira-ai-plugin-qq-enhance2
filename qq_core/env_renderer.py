@@ -252,7 +252,11 @@ def _render_type(etype: str, events: list[QQEvent],
                 duration = int(float(ev.extra.get("duration", 0) or 0))
             except (TypeError, ValueError):
                 duration = 0
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
+            if ev.actor:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
+            else:
+                # 协议端没给 operator_id 时不要渲染成"被 用户(未知) 禁言"
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被禁言"
             if duration > 0:
                 part += f" {duration}秒"
             # 配对解除事件（同 target，时间晚于本次 ban）
@@ -280,7 +284,10 @@ def _render_type(etype: str, events: list[QQEvent],
         for ev in events:
             if ev.target in ban_targets:
                 continue  # 已由 E_BAN 分支配对显示
-            part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
+            if ev.actor:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
+            else:
+                part = f"{_fmt_user(ev.target, ev.target_name)} 被解除禁言"
             parts.append(part)
         return "；".join(parts)
 
@@ -288,7 +295,8 @@ def _render_type(etype: str, events: list[QQEvent],
         parts = []
         for ev in events:
             sub = ev.extra.get("sub_type", "")
-            if sub == "kick":
+            # 注意 kick_me 是"被踢的人（通常是 bot）"，个别协议端会给他人也标 kick_me
+            if sub in ("kick", "kick_me"):
                 action = "被移出群聊"
             elif sub == "leave":
                 action = "退群"
@@ -310,7 +318,9 @@ def _render_type(etype: str, events: list[QQEvent],
         parts = []
         for key, lst in by_actor.items():
             ev0 = lst[0]
-            who = _fmt_user(ev0.actor, ev0.actor_name)
+            # 私聊撤回常常没有 operator_id → 用被撤回消息的作者兜底，
+            # 否则会渲染出"用户(未知) 撤回了一条消息"
+            who = _fmt_user(ev0.actor or ev0.target, ev0.actor_name or ev0.target_name)
             # 区分操作者身份：撤回自己 vs 撤回他人
             if ev0.actor and ev0.target and ev0.actor != ev0.target:
                 detail = "撤回了他人消息"

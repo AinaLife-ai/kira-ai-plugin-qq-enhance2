@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import base64
+import os
 import re
 
 # 控制字符（含换行/回车/制表/零宽/RTL）
@@ -158,5 +160,69 @@ def normalize_file_uri(value) -> str:
         compact = re.sub(r"\s+", "", s)
         if len(compact) >= 64:
             return f"base64://{compact}"
-    # 其他情况（本地路径等）原样返回
+    # 其他情况 → 本地路径。
+    # **相对路径必须转绝对**：协议端（NapCat）用自己的 cwd 解析相对路径，
+    # 与框架进程的 cwd 通常不同 → 传 "./a.png" 过去 100% 找不到文件。
+    if not os.path.isabs(s):
+        return os.path.abspath(s)
     return s
+
+
+# 本地文件内联阈值：≤2MB 直接转 base64 发给协议端。
+# 为什么不直接传路径：NapCat 可能跑在 Docker / 另一台机器，
+# KiraAI 这边的绝对路径它根本读不到；base64 走 WS 没有这个问题。
+_INLINE_MAX_BYTES = 2 * 1024 * 1024
+
+
+def file_to_protocol_uri(value, *, max_inline_bytes: int = _INLINE_MAX_BYTES) -> tuple[str, str]:
+    """把用户/LLM 给的 file 参数转成协议端一定能用的形式。
+
+    规则：
+      · http(s):// / data: / base64:// / file:// → 原样返回
+      · 本地文件存在且 ≤ max_inline_bytes → 读成 base64://（跨主机/容器也能用）
+      · 本地文件存在但太大 → 返回绝对路径（跨主机时协议端可能读不到）
+      · 本地文件不存在 → 返回 (绝对路径, 错误说明)
+
+    Args:
+        value: 原始 file 参数。
+        max_inline_bytes: 内联 base64 的最大字节数。
+
+    Returns:
+        (uri, error)：error 为空表示可用。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return "", ""
+    for prefix in _FILE_URI_PREFIXES:
+        if s.startswith(prefix):
+            # file:// 也转成本地路径处理（协议端对 file:// 支持不一致）
+            if s.startswith("file://"):
+                path = s[len("file://"):]
+                return _local_to_uri(path, max_inline_bytes)
+            return s, ""
+    # 纯 base64 字符串（无前缀）
+    if len(s) >= 64 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", s):
+        compact = re.sub(r"\s+", "", s)
+        if len(compact) >= 64:
+            return f"base64://{compact}", ""
+    return _local_to_uri(s, max_inline_bytes)
+
+
+def _local_to_uri(path: str, max_inline_bytes: int) -> tuple[str, str]:
+    """本地路径 → (协议端可用 uri, 错误说明)。"""
+    p = os.path.abspath(path) if not os.path.isabs(path) else path
+    if not os.path.isfile(p):
+        return p, f"本地文件不存在：{p}（若协议端不在同一台机器，请改用 http(s) URL 或 base64）"
+    try:
+        size = os.path.getsize(p)
+    except OSError as e:
+        return p, f"无法读取文件信息：{p}（{e}）"
+    if size <= max_inline_bytes:
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            return "base64://" + base64.b64encode(data).decode(), ""
+        except OSError as e:
+            return p, f"读取文件失败：{p}（{e}）"
+    # 太大：只传路径（协议端同机时仍可用）
+    return p, ""

@@ -52,13 +52,17 @@ def test_bug23_special_title_param():
 # ============ Bug 24: set_qq_profile 逐字段 ============
 
 def test_bug24_field_by_field():
-    """LLOneBot 不支持 sex → 逐字段尝试，不能整体失败。"""
+    """逐字段尝试，不能因为某个字段不支持就整体失败。
+
+    第 16 轮起进一步拆分：昵称 / 签名 / 性别 各自独立提交
+    （NapCat 的签名要用 set_self_longnick，和昵称不是同一个 action）。
+    """
     src = Path(__file__).parent.parent.joinpath("tools", "qq_profile.py").read_text(encoding="utf-8")
-    # 性别单独尝试
     assert 'if "sex" in update_fields:' in src, "性别应单独尝试"
-    # 昵称/签名走 common
-    assert 'common = {k: v for k, v in update_fields.items()' in src, "昵称/签名应批量提交"
-    print("  ✓ Bug24: set_qq_profile 逐字段尝试（兼容 LLOneBot）")
+    assert 'if "nickname" in update_fields:' in src, "昵称应单独提交"
+    assert 'if "personal_note" in update_fields:' in src, "签名应单独提交"
+    assert "set_self_longnick" in src, "签名应优先用 NapCat 专用接口"
+    print("  ✓ Bug24: 昵称/签名/性别逐字段尝试（兼容 LLOneBot / NapCat）")
 
 
 # ============ Bug 25: emoji_dict 加载标记 ============

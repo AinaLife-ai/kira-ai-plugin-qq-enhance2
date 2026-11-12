@@ -481,6 +481,12 @@ class QQEnhance2Plugin(BasePlugin):
 
         # 只处理 notice 事件
         if not event.is_notice:
+            # 顺便缓存群名（普通消息也带 group_name，成本 0）
+            grp0 = getattr(event.message, "group", None)
+            if self.wake_scheduler and grp0 is not None:
+                self.wake_scheduler.remember_group_name(
+                    str(getattr(grp0, "group_id", "") or ""),
+                    getattr(grp0, "group_name", ""))
             # 记录普通消息到 locator（用于撤回定位）
             if event.message.message_id and event.message.chain:
                 msg_text = " ".join(ele.repr for ele in event.message.chain)

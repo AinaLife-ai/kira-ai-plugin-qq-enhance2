@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 
 from core.logging_manager import get_logger
 from core.chat.message_utils import KiraMessageBatchEvent
@@ -20,34 +22,41 @@ from core.plugin import PluginContext
 
 logger = get_logger("qq_enhance2.qq_profile", "cyan")
 
+# 头像描述缓存：同一 URL 10 分钟内不重复调 VLM。
+# 每次 VLM 调用都是钱 + 几秒延迟，而同一个人的头像短时间内不会变。
+# 只缓存成功结果（失败可能是网络抖动，不该被记住）。
+_AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+_AVATAR_DESC_TTL = 600.0
+_AVATAR_DESC_MAX = 128
+
 
 class QQProfileTool(BaseTool):
     """QQ 用户资料工具（读+写合体）。"""
 
     name = "qq_profile"
-    description = "查询或修改QQ用户资料。不传 user_id 时操作自己；传 user_id 时查询他人（仅查询，不可修改他人）。修改时只传需要修改的字段。查询时会查看头像内容。支持设置自己头像（avatar 传图片路径/URL/base64）。"
+    description = "查询/修改QQ资料。不传 user_id=操作自己（可改）；传=查他人（只读）。查询时会看头像内容。改头像：avatar 传路径/URL/base64 或 recent（用当前对话最新图片）。"
     parameters = {
         "type": "object",
         "properties": {
             "user_id": {
                 "type": "string",
-                "description": "目标QQ号。不传=操作自己；传=查询他人资料（只读）。",
+                "description": "目标QQ。不传=自己；传=查他人（只读）",
             },
             "nickname": {
                 "type": "string",
-                "description": "新昵称（仅自己可改）。不传=不修改。",
+                "description": "新昵称（仅自己）。不传=不改",
             },
             "personal_note": {
                 "type": "string",
-                "description": "新个性签名（仅自己可改）。不传=不修改。",
+                "description": "新签名（仅自己）。不传=不改；空串=清除",
             },
             "sex": {
                 "type": "integer",
-                "description": "性别：0未知 1男 2女（仅自己可改，部分协议端不支持）。不传=不修改。",
+                "description": "0未知/1男/2女（仅自己，部分协议端不支持）",
             },
             "avatar": {
                 "type": "string",
-                "description": "新头像（仅自己可改）。传图片路径、URL 或 base64。不传=不修改。",
+                "description": "新头像（仅自己）：本地路径/URL/base64，或 recent=对话里最新图片。不传=不改",
             },
         },
     }
@@ -102,7 +111,9 @@ class QQProfileTool(BaseTool):
             QQ 号字符串；都取不到时为空串。
         """
         candidates = [
-            getattr(event, "self_id", "") if event is not None else "",
+            # KiraMessageBatchEvent.self_id 是 property（messages[-1].self_id），
+            # messages 为空时会抛 IndexError → 必须兜住
+            self._safe_attr(event, "self_id"),
             self.self_id,
             getattr(getattr(self.adapter, "bot", None), "self_id", ""),
         ]
@@ -115,6 +126,15 @@ class QQProfileTool(BaseTool):
                 if s and s != "None":
                     return s
         return ""
+
+    @staticmethod
+    def _safe_attr(obj, name: str) -> str:
+        """安全读属性（property 可能抛异常，例如 messages 为空时的 self_id）。"""
+        try:
+            v = getattr(obj, name, "") if obj is not None else ""
+            return str(v) if v else ""
+        except Exception:
+            return ""
 
     async def _api(self, action: str, params: dict, timeout: float = 6.0) -> dict:
         """调用协议端 action 并返回 data 字典（带独立超时）。
@@ -185,9 +205,11 @@ class QQProfileTool(BaseTool):
             )
         is_self = (target == cur_self_id) if cur_self_id else False
 
+        group_id = self._event_group_id(event)
+
         if not is_self:
             # 查询模式：只查询，忽略修改字段
-            return await self._query_user(target, is_self=False)
+            return await self._query_user(target, is_self=False, group_id=group_id)
 
         # 读写模式：操作自己
         # 构建修改字段
@@ -199,13 +221,31 @@ class QQProfileTool(BaseTool):
         if personal_note is not None:
             update_fields["personal_note"] = personal_note
         if sex is not None:
-            update_fields["sex"] = int(sex)
+            # LLM 可能传 "male" / "1" / 1 → 统一转 int，非法值忽略（不整条报错）
+            try:
+                update_fields["sex"] = int(sex)
+            except (TypeError, ValueError):
+                logger.debug(f"[QQ增强2] 忽略非法 sex 值: {sex!r}")
 
         # 头像走独立 action（set_qq_avatar），参数是 file
-        avatar_file = self._normalize_file_uri(avatar)
+        # 「换头像」最常见的用法是"用我刚发的图"——但图片在 prompt 里只有
+        # [Image: 描述]，LLM 拿不到路径/URL。所以支持 avatar="recent"：
+        # 从当前批次的消息链里取最新的一张图。
+        avatar_raw = str(avatar or "").strip()
+        if avatar_raw.lower() in ("recent", "last", "latest", "current",
+                                  "最近", "刚才", "最新"):
+            avatar_raw = self._latest_image_file(event)
+            if not avatar_raw:
+                return (
+                    "修改头像失败：当前消息里没有图片。\n"
+                    "请先发送一张图片，或把 avatar 传成图片 URL / 本地路径 / base64。"
+                )
+        avatar_file, avatar_err = self._prepare_file(avatar_raw)
+        if avatar_err:
+            return f"修改头像失败：{avatar_err}"
         if not update_fields and not avatar_file:
             # 未传修改字段：返回当前资料
-            return await self._query_user(target, is_self=is_self)
+            return await self._query_user(target, is_self=is_self, group_id=group_id)
 
         # 执行修改
         # 注意：不同协议端支持的字段不同（如 LLOneBot 的 set_qq_profile 只支持
@@ -213,14 +253,44 @@ class QQProfileTool(BaseTool):
         # 逐字段尝试，避免"只改性别失败导致全部失败"。
         results = []
         try:
-            # 先提交协议端普遍支持的字段（昵称、签名）
-            common = {k: v for k, v in update_fields.items() if k in ("nickname", "personal_note")}
-            if common:
-                resp = await self.adapter.bot.send_action("set_qq_profile", common)
-                if not isinstance(resp, dict) or resp.get("status") != "ok":
+            # 昵称：OB11 标准 set_qq_profile
+            if "nickname" in update_fields:
+                resp = await self.adapter.bot.send_action(
+                    "set_qq_profile", {"nickname": update_fields["nickname"]}
+                )
+                if isinstance(resp, dict) and resp.get("status") == "ok":
+                    results.append("昵称已更新")
+                else:
                     err = (resp or {}).get("wording") or str(resp)
-                    return f"修改失败：{err}"
-                results.append("昵称/签名已更新")
+                    results.append(f"昵称修改失败：{err}")
+
+            # 个性签名：优先 NapCat 专用 set_self_longnick（参数 longNick），
+            # 回退 OB11 的 set_qq_profile(personal_note)。
+            # 之前只用 set_qq_profile → NapCat 上签名实际改不动却报成功。
+            if "personal_note" in update_fields:
+                note = update_fields["personal_note"]
+                ok = False
+                err = ""
+                try:
+                    resp = await self.adapter.bot.send_action(
+                        "set_self_longnick", {"longNick": note}
+                    )
+                    if isinstance(resp, dict) and resp.get("status") == "ok":
+                        ok = True
+                    else:
+                        err = (resp or {}).get("wording") or str(resp)
+                except Exception as e:
+                    err = str(e).strip() or type(e).__name__
+                if not ok:
+                    try:
+                        resp = await self.adapter.bot.send_action(
+                            "set_qq_profile", {"personal_note": note}
+                        )
+                        if isinstance(resp, dict) and resp.get("status") == "ok":
+                            ok = True
+                    except Exception as e:
+                        err = err or str(e).strip() or type(e).__name__
+                results.append("个性签名已更新" if ok else f"个性签名修改失败：{err}")
 
             # 性别：单独尝试（部分协议端不支持）
             if "sex" in update_fields:
@@ -247,19 +317,23 @@ class QQProfileTool(BaseTool):
                         err = (resp or {}).get("wording") if isinstance(resp, dict) else resp
                         results.append(f"头像修改失败（{err or '当前协议端可能不支持'}）")
                 except Exception as e:
-                    results.append(f"头像修改失败（当前协议端可能不支持：{type(e).__name__}）")
+                    # NapCat 的 set_qq_avatar 失败时是 **throw**（不是返回 failed），
+                    # 且 message 里有具体原因（文件不是图片 / 无法获取图片 / api无返回…）
+                    reason = str(e).strip() or type(e).__name__
+                    results.append(f"头像修改失败：{reason}")
 
             if not results:
-                return await self._query_user(target, is_self=is_self)
+                return await self._query_user(target, is_self=is_self, group_id=group_id)
             # 返回修改结果 + 最新资料
             summary = "；".join(results)
-            profile = await self._query_user(target, is_self=is_self)
+            profile = await self._query_user(target, is_self=is_self, group_id=group_id)
             return f"修改完成（{summary}）。\n{profile}"
         except Exception as e:
             logger.debug(f"[QQ增强2] set_qq_profile 失败: {e}")
             return f"修改失败：{e}"
 
-    async def _query_user(self, qq: str, *, is_self: bool = False) -> str:
+    async def _query_user(self, qq: str, *, is_self: bool = False,
+                          group_id: str = "") -> str:
         """查询用户资料（含头像读图）。
 
         字段来源（**实测 NapCat 与文档差异**）：
@@ -275,6 +349,7 @@ class QQProfileTool(BaseTool):
         Args:
             qq: QQ 号。
             is_self: 是否查询自己（决定是否走 get_login_info 兜底）。
+            group_id: 当前群号（群聊里查询时补一行「群名片」，**不替代昵称**）。
 
         Returns:
             资料文本。
@@ -331,8 +406,34 @@ class QQProfileTool(BaseTool):
         if not head_url:
             head_url = await self._fetch_avatar_url(qq)
 
+        # 群名片：群聊里额外补一行（与 QQ 昵称**并存**，不替代）。
+        # 群里大家通常按群名片称呼，昵称往往完全对不上人。
+        # 注意顺序：先取群名片，再做"完全没信息"判定 ——
+        # 否则 get_stranger_info 失败但群成员信息可用时会误报查询失败。
+        card_line = ""
+        member: dict = {}
+        if group_id:
+            try:
+                member = await self._api(
+                    "get_group_member_info",
+                    {"group_id": group_id, "user_id": qq, "no_cache": False},
+                    timeout=4.0,
+                )
+            except Exception as e:
+                logger.debug(f"[QQ增强2] 群名片查询失败: {group_id}/{qq}: {e}")
+                member = {}
+            if member:
+                card = str(member.get("card") or "").strip()
+                role_map = {"owner": "群主", "admin": "管理员", "member": "成员"}
+                role = role_map.get(str(member.get("role") or ""), "")
+                card_line = f"  群名片：{card or '（无）'}\n"
+                if role:
+                    card_line += f"  群角色：{role}\n"
+                if not nickname:
+                    nickname = str(member.get("nickname") or "").strip()
+
         # 完全拿不到任何信息 → 明确报错（区分超时/无权限）
-        if not data and not login and not nickname:
+        if not data and not login and not nickname and not member:
             if timed_out:
                 return (
                     f"查询失败：协议端 6 秒内没有响应 get_stranger_info（user_id={qq}）。\n"
@@ -343,6 +444,7 @@ class QQProfileTool(BaseTool):
 
         result = f"用户 {qq} 的资料：\n"
         result += f"  昵称：{nickname or '（未提供）'}\n"
+        result += card_line
         if personal_note:
             result += f"  个性签名：{personal_note}\n"
         elif timed_out:
@@ -364,6 +466,53 @@ class QQProfileTool(BaseTool):
         if timed_out:
             result += "  （注：get_stranger_info 超时，以上为可获取到的部分信息）\n"
         return result
+
+    @staticmethod
+    def _event_group_id(event) -> str:
+        """取当前会话的群号（私聊返回空串）。
+
+        Args:
+            event: KiraMessageBatchEvent。
+
+        Returns:
+            群号字符串；私聊/取不到时为空。
+        """
+        session = getattr(event, "session", None)
+        if session is not None and getattr(session, "session_type", "") == "gm":
+            gid = str(getattr(session, "session_id", "") or "")
+            if gid:
+                return gid
+        for msg in getattr(event, "messages", []) or []:
+            grp = getattr(msg, "group", None)
+            if grp is not None:
+                gid = str(getattr(grp, "group_id", "") or "")
+                if gid:
+                    return gid
+        return ""
+
+    @staticmethod
+    def _latest_image_file(event) -> str:
+        """取当前消息批次里最新一张图片的 file（路径 / URL / base64）。
+
+        为什么需要：图片在 prompt 里只剩 `[Image: 描述]`，LLM 拿不到路径，
+        所以「用我刚发的图当头像」这种最常见的用法必须由插件自己从
+        event.messages 的消息链里取。
+
+        Args:
+            event: KiraMessageBatchEvent。
+
+        Returns:
+            图片 file 字符串；没有图片时返回空串。
+        """
+        for msg in reversed(list(getattr(event, "messages", []) or [])):
+            chain = list(getattr(msg, "chain", []) or [])
+            for ele in reversed(chain):
+                if not isinstance(ele, Image):
+                    continue
+                f = getattr(ele, "file", "") or getattr(ele, "image", "")
+                if f:
+                    return str(f)
+        return ""
 
     @staticmethod
     def _fallback_avatar_url(qq: str) -> str:
@@ -399,6 +548,12 @@ class QQProfileTool(BaseTool):
         Returns:
             头像描述文本；失败时返回空串。
         """
+        # 缓存命中直接返回（省一次 VLM 调用）
+        cached = _AVATAR_DESC_CACHE.get(head_url)
+        if cached and time.time() - cached[1] < _AVATAR_DESC_TTL:
+            _AVATAR_DESC_CACHE.move_to_end(head_url)
+            return cached[0]
+
         try:
             from core.utils.common_utils import desc_img
 
@@ -429,6 +584,11 @@ class QQProfileTool(BaseTool):
             desc = (desc or "").strip()
             if len(desc) > 300:
                 desc = desc[:300] + "…"
+            if desc:
+                _AVATAR_DESC_CACHE[head_url] = (desc, time.time())
+                _AVATAR_DESC_CACHE.move_to_end(head_url)
+                while len(_AVATAR_DESC_CACHE) > _AVATAR_DESC_MAX:
+                    _AVATAR_DESC_CACHE.popitem(last=False)
             return desc
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
@@ -459,6 +619,37 @@ class QQProfileTool(BaseTool):
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _prepare_file(value) -> tuple[str, str]:
+        """把 file 参数转成协议端可用形式，返回 (uri, 错误说明)。
+
+        本地路径会读成 `base64://`（≤2MB），这样即使 NapCat 跑在 Docker /
+        另一台机器也能用；文件不存在时返回明确错误，而不是让协议端报
+        "文件可能不存在"。
+
+        Args:
+            value: 原始 file 参数。
+
+        Returns:
+            (uri, error)。error 为空表示可用。
+        """
+        try:
+            from qq_core.fmt import file_to_protocol_uri
+            return file_to_protocol_uri(value)
+        except ImportError:
+            pass
+        try:
+            import importlib
+            parts = __name__.split(".")
+            if len(parts) >= 2:
+                parent_pkg = ".".join(parts[:-1])
+                mod = importlib.import_module(f"{parent_pkg}.qq_core.fmt")
+                return mod.file_to_protocol_uri(value)
+        except Exception:
+            pass
+        # 兜底：只做前缀归一化（不读文件）
+        return QQProfileTool._normalize_file_uri(value), ""
 
     @staticmethod
     def _normalize_file_uri(value) -> str:

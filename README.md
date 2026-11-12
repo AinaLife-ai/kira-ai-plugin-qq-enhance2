@@ -25,8 +25,11 @@
 - **被移出群**：自己被移出群聊时立即唤醒。
 
 ### 工具层
-- **`qq_profile`**：查询或修改 QQ 用户资料（昵称/个性签名/性别/头像）。不传 user_id=操作自己；传 user_id=查询他人（只读）。**查询时自动下载头像并用 VLM 查看头像内容**（不是只给 URL，LLM 能真正"看到"头像）。**支持设置自己头像**（`avatar` 传图片路径/URL/base64）。
-- **`qq_group_profile`**：查询或修改群成员资料（群名片/头衔）。不传 user_id=操作自己；传 user_id=查询他人（只读）。**支持设置群头像**（`group_portrait`，需管理员权限，SnowLuma 不支持）。
+- **`qq_profile`**：查询或修改 QQ 用户资料（昵称/个性签名/性别/头像）。不传 user_id=操作自己；传 user_id=查询他人（只读）。
+  - 查询时自动下载头像并用 VLM 查看头像内容（不是只给 URL）；同一头像 10 分钟内不重复调 VLM。
+  - **群聊里查询会额外多一行「群名片」**（与昵称并存，不替代昵称）和「群角色」。
+  - 修改：昵称走 `set_qq_profile`；签名优先 NapCat 专用 `set_self_longnick`（失败回退 `set_qq_profile.personal_note`）；头像 `avatar` 传路径/URL/base64，或传 `recent` 用当前对话里最新的一张图。
+- **`qq_group_profile`**：查询或修改群成员资料（群名片/头衔/角色）。不传 user_id=操作自己；传 user_id=查询他人（只读）。**支持设置群头像**（`group_portrait`，需管理员权限，SnowLuma 不支持）。
 - **`fetch_emoji_like`**：拉取指定 QQ 消息的全部贴表情回应（含贴的人、表情 ID、次数）。支持分页。
 
 ### 协议端兼容
@@ -194,7 +197,21 @@
   `https://q1.qlogo.cn/g?b=qq&nk={QQ}&s=640`（按 QQ 号直出，不依赖协议端）。
 - `qq_group_profile` 同样补上 self_id 兜底（空 user_id 会挂满超时）。
 
+### 🛠 工具增强 / 修复
+- **改个性签名**：此前只调 `set_qq_profile(personal_note)`，NapCat 上实际改不动却报成功。
+  现在优先 NapCat 专用 **`set_self_longnick`（longNick）**，失败再回退 OB11 参数。
+- **改群名片**：`set_group_card` 独立提交，空字符串=清除；失败原因原样透出。
+- **查资料显示群名片**：群聊里查询会**额外多一行**「群名片」+「群角色」（与昵称并存，不替代昵称）。
+- **换头像支持 `recent`**：图片在 prompt 里只剩 `[Image: 描述]`，LLM 拿不到路径 →
+  `avatar="recent"` 自动取当前对话里最新的一张图。
+- **换头像支持本地路径**：≤2MB 的本地文件会**读成 `base64://`** 再发给协议端
+  （NapCat 跑在 Docker / 另一台机器也能用）；文件不存在时直接报错，不发 API。
+- 头像描述加 10 分钟缓存（同一 URL 不重复调 VLM，省 token 与几秒延迟）。
+- 工具 schema 精简 1701 → 1506 字符（≈425 → 376 tokens/轮）。
+
 ### ✅ 验证
+- 新增 `tests/frontend_backend_check.py`（schema↔代码↔README 12 项一致性）、
+  `tests/perf_token_check.py`（token/耗时量化）
 - 新增 `tests/test_self_scope.py`（20 项，归一化边界）+
   `tests/self_scope_integration.py`（15 项，真实框架端到端）
   + `tests/test_profile_tool.py`（10 项）
