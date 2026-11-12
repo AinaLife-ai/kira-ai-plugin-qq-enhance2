@@ -1,46 +1,64 @@
 """表情 ID → 中文名映射（对齐框架 qq/emoji.json 的机制）。
 
 加载策略（按可靠性排序）：
-1. 从已加载的 QQ 适配器实例拿（最可靠，框架自己加载的）
-2. 从框架源码路径推导（相对插件目录无法确定，用 importlib 定位框架包）
-3. 都失败 → 空字典（显示原始 ID，功能不受影响）
+1. 从框架 core.adapter / core 包位置推导 emoji.json
+2. 都失败 → 空字典（显示原始 ID，功能不受影响）
+
+注意：只有成功加载到数据才标记 _LOADED，避免"插件早于框架模块加载"
+时永久失去表情映射（框架的 emoji.json 是随 core.adapter 提供的）。
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
-from typing import Any
 
 _EMOJI_DICT: dict[str, str] = {}
 _LOADED = False
 
 
+def _try_load_from(base: str, candidates: tuple[str, ...]) -> bool:
+    """尝试从给定基准目录加载 emoji.json。
+
+    Args:
+        base: 基准目录。
+        candidates: 相对 base 的候选路径。
+
+    Returns:
+        True = 加载成功。
+    """
+    for rel in candidates:
+        path = os.path.join(base, rel)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data:
+                _EMOJI_DICT.update({str(k): str(v) for k, v in data.items()})
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _load_dict():
-    """加载框架的 emoji.json（幂等，只尝试一次）。"""
-    global _EMOJI_DICT, _LOADED
+    """加载框架的 emoji.json（幂等，成功后不再重试）。"""
+    global _LOADED
     if _LOADED:
         return
-    _LOADED = True
 
-    # 路径 1：从框架已 import 的 core.adapter 模块推导
+    # 路径 1：从已 import 的 core.adapter 模块推导
     try:
         import core.adapter as _ca
         base = os.path.dirname(os.path.abspath(_ca.__file__))
-        # core/adapter/ → core/adapter/src/qq/emoji.json
-        candidates = [
-            os.path.join(base, "src", "qq", "emoji.json"),
-            os.path.join(base, "qq", "emoji.json"),
-            os.path.join(base, "emoji.json"),
-        ]
-        for c in candidates:
-            if os.path.exists(c):
-                with open(c, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data:
-                    _EMOJI_DICT.update({str(k): str(v) for k, v in data.items()})
-                    return
+        if _try_load_from(base, (
+            os.path.join("src", "qq", "emoji.json"),
+            os.path.join("qq", "emoji.json"),
+            "emoji.json",
+        )):
+            _LOADED = True
+            return
     except Exception:
         pass
 
@@ -48,16 +66,24 @@ def _load_dict():
     try:
         import core as _core
         base = os.path.dirname(os.path.abspath(_core.__file__))
-        for c in (
-            os.path.join(base, "adapter", "src", "qq", "emoji.json"),
-            os.path.join(base, "adapter", "qq", "emoji.json"),
-        ):
-            if os.path.exists(c):
-                with open(c, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data:
-                    _EMOJI_DICT.update({str(k): str(v) for k, v in data.items()})
-                    return
+        if _try_load_from(base, (
+            os.path.join("adapter", "src", "qq", "emoji.json"),
+            os.path.join("adapter", "qq", "emoji.json"),
+        )):
+            _LOADED = True
+            return
+    except Exception:
+        pass
+
+    # 路径 3：按插件目录相对定位（框架与插件同级部署时）
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        # 插件目录 → 上溯找 core/adapter/src/qq/emoji.json
+        for depth in range(1, 5):
+            base = os.path.abspath(os.path.join(here, *([".."] * depth)))
+            if _try_load_from(base, (os.path.join("core", "adapter", "src", "qq", "emoji.json"),)):
+                _LOADED = True
+                return
     except Exception:
         pass
 

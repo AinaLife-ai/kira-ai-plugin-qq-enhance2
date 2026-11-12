@@ -21,7 +21,7 @@ class QQGroupProfileTool(BaseTool):
     """QQ 群成员资料工具（群名片/头衔，读+写合体）。"""
 
     name = "qq_group_profile"
-    description = "查询或修改群成员资料。不传 user_id 时操作自己在当前群的群名片/头衔；传 user_id 时查询他人群名片/头衔。修改群名片或头衔可能需要管理员权限。"
+    description = "查询或修改群成员资料。不传 user_id 时操作自己在当前群的群名片/头衔；传 user_id 时查询他人群名片/头衔。修改群名片或头衔可能需要管理员权限。支持设置群头像（group_portrait）。"
     parameters = {
         "type": "object",
         "properties": {
@@ -39,7 +39,11 @@ class QQGroupProfileTool(BaseTool):
             },
             "title_duration": {
                 "type": "integer",
-                "description": "头衔有效时长（秒），-1=永久。默认 -1。",
+                "description": "头衔有效天数，-1=永久。默认 -1。（OB11 该字段单位为天）",
+            },
+            "group_portrait": {
+                "type": "string",
+                "description": "新群头像（需群主/管理员权限）。传图片路径、URL 或 base64。不传=不修改。（部分协议端不支持）",
             },
         },
     }
@@ -57,6 +61,7 @@ class QQGroupProfileTool(BaseTool):
         card: str = None,
         title: str = None,
         title_duration: int = -1,
+        group_portrait: str = "",
         **kwargs,
     ) -> str:
         """执行工具。
@@ -66,7 +71,8 @@ class QQGroupProfileTool(BaseTool):
             user_id: 目标 QQ 号（不传=操作自己）。
             card: 新群名片。None=不修改；空字符串=清除群名片。
             title: 新头衔。None=不修改；空字符串=清除头衔。
-            title_duration: 头衔有效时长（-1=永久）。
+            title_duration: 头衔有效天数（-1=永久，OB11 单位为天）。
+            group_portrait: 新群头像（路径/URL/base64）。空=不修改。
 
         Returns:
             操作结果文本。
@@ -81,6 +87,21 @@ class QQGroupProfileTool(BaseTool):
         group_id = event.session.session_id
         target = str(user_id) if user_id else self.self_id
         is_self = (target == self.self_id) if self.self_id else False
+        portrait_file = (group_portrait or "").strip()
+
+        # 群头像是群级操作（需管理员权限），与"操作自己/他人"无关，单独处理
+        if portrait_file:
+            try:
+                resp = await self.adapter.bot.send_action("set_group_portrait", {
+                    "group_id": group_id,
+                    "file": portrait_file,
+                })
+                if isinstance(resp, dict) and resp.get("status") == "ok":
+                    return "✅ 群头像已更新"
+                err = (resp or {}).get("wording") if isinstance(resp, dict) else resp
+                return f"修改群头像失败：{err or '当前协议端可能不支持'}"
+            except Exception as e:
+                return f"修改群头像失败（当前协议端可能不支持：{type(e).__name__}）"
 
         if not is_self:
             # 查询模式
@@ -113,10 +134,12 @@ class QQGroupProfileTool(BaseTool):
                     return f"修改群名片失败：{err}"
 
             if "title" in update_fields:
+                # 注意：OB11 扩展 action 的参数名是 special_title（不是 title）
+                # （对齐 group_manager 插件的已验证实现）
                 resp = await self.adapter.bot.send_action("set_group_special_title", {
                     "group_id": group_id,
                     "user_id": target,
-                    "title": update_fields["title"],
+                    "special_title": update_fields["title"],
                     "duration": update_fields.get("duration", -1),
                 })
                 if not isinstance(resp, dict) or resp.get("status") != "ok":

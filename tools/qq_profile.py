@@ -23,7 +23,7 @@ class QQProfileTool(BaseTool):
     """QQ 用户资料工具（读+写合体）。"""
 
     name = "qq_profile"
-    description = "查询或修改QQ用户资料。不传 user_id 时操作自己；传 user_id 时查询他人（仅查询，不可修改他人）。修改时只传需要修改的字段。查询时会查看头像内容。"
+    description = "查询或修改QQ用户资料。不传 user_id 时操作自己；传 user_id 时查询他人（仅查询，不可修改他人）。修改时只传需要修改的字段。查询时会查看头像内容。支持设置自己头像（avatar 传图片路径/URL/base64）。"
     parameters = {
         "type": "object",
         "properties": {
@@ -41,7 +41,11 @@ class QQProfileTool(BaseTool):
             },
             "sex": {
                 "type": "integer",
-                "description": "性别：0未知 1男 2女（仅自己可改）。不传=不修改。",
+                "description": "性别：0未知 1男 2女（仅自己可改，部分协议端不支持）。不传=不修改。",
+            },
+            "avatar": {
+                "type": "string",
+                "description": "新头像（仅自己可改）。传图片路径、URL 或 base64。不传=不修改。",
             },
         },
     }
@@ -60,6 +64,7 @@ class QQProfileTool(BaseTool):
         nickname: str = None,
         personal_note: str = None,
         sex: int = None,
+        avatar: str = "",
         **kwargs,
     ) -> str:
         """执行工具。
@@ -70,6 +75,7 @@ class QQProfileTool(BaseTool):
             nickname: 新昵称。None=不修改（QQ 昵称不可为空）。
             personal_note: 新个性签名。None=不修改；空字符串=清除签名。
             sex: 新性别。None=不修改。
+            avatar: 新头像（图片路径/URL/base64）。空=不修改。
 
         Returns:
             操作结果文本。
@@ -97,18 +103,60 @@ class QQProfileTool(BaseTool):
         if sex is not None:
             update_fields["sex"] = int(sex)
 
-        if not update_fields:
+        # 头像走独立 action（set_qq_avatar），参数是 file
+        avatar_file = (avatar or "").strip()
+        if not update_fields and not avatar_file:
             # 未传修改字段：返回当前资料
             return await self._query_user(target)
 
         # 执行修改
+        # 注意：不同协议端支持的字段不同（如 LLOneBot 的 set_qq_profile 只支持
+        # nickname / personal_note，传 sex 会被 schema 拒绝）。
+        # 逐字段尝试，避免"只改性别失败导致全部失败"。
+        results = []
         try:
-            resp = await self.adapter.bot.send_action("set_qq_profile", update_fields)
-            if not isinstance(resp, dict) or resp.get("status") != "ok":
-                err = (resp or {}).get("wording") or str(resp)
-                return f"修改失败：{err}"
-            # 返回修改后的完整资料
-            return await self._query_user(target)
+            # 先提交协议端普遍支持的字段（昵称、签名）
+            common = {k: v for k, v in update_fields.items() if k in ("nickname", "personal_note")}
+            if common:
+                resp = await self.adapter.bot.send_action("set_qq_profile", common)
+                if not isinstance(resp, dict) or resp.get("status") != "ok":
+                    err = (resp or {}).get("wording") or str(resp)
+                    return f"修改失败：{err}"
+                results.append("昵称/签名已更新")
+
+            # 性别：单独尝试（部分协议端不支持）
+            if "sex" in update_fields:
+                try:
+                    resp = await self.adapter.bot.send_action(
+                        "set_qq_profile", {"sex": update_fields["sex"]}
+                    )
+                    if isinstance(resp, dict) and resp.get("status") == "ok":
+                        results.append("性别已更新")
+                    else:
+                        results.append("性别修改失败（当前协议端可能不支持）")
+                except Exception as e:
+                    results.append(f"性别修改失败（当前协议端不支持：{type(e).__name__}）")
+
+            # 头像：单独 action set_qq_avatar（参数 file，支持路径/URL/base64）
+            if avatar_file:
+                try:
+                    resp = await self.adapter.bot.send_action(
+                        "set_qq_avatar", {"file": avatar_file}
+                    )
+                    if isinstance(resp, dict) and resp.get("status") == "ok":
+                        results.append("头像已更新")
+                    else:
+                        err = (resp or {}).get("wording") if isinstance(resp, dict) else resp
+                        results.append(f"头像修改失败（{err or '当前协议端可能不支持'}）")
+                except Exception as e:
+                    results.append(f"头像修改失败（当前协议端可能不支持：{type(e).__name__}）")
+
+            if not results:
+                return await self._query_user(target)
+            # 返回修改结果 + 最新资料
+            summary = "；".join(results)
+            profile = await self._query_user(target)
+            return f"修改完成（{summary}）。\n{profile}"
         except Exception as e:
             logger.debug(f"[QQ增强2] set_qq_profile 失败: {e}")
             return f"修改失败：{e}"
@@ -130,9 +178,9 @@ class QQProfileTool(BaseTool):
 
             nickname = data.get("nickname") or ""
             personal_note = data.get("sign") or data.get("personal_note") or ""
+            # 性别：不同协议端可能返回 int 或 str（"1"/"male"），统一归一化
             sex_map = {0: "未知", 1: "男", 2: "女"}
-            sex_val = data.get("sex", 0)
-            sex_str = sex_map.get(sex_val, "未知")
+            sex_str = self._normalize_sex(data.get("sex"))
             head_url = data.get("headUrl") or data.get("avatar") or ""
 
             result = f"用户 {qq} 的资料：\n"
@@ -189,6 +237,30 @@ class QQProfileTool(BaseTool):
         except Exception as e:
             logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
             return ""
+
+    @staticmethod
+    def _normalize_sex(val) -> str:
+        """归一化性别字段（兼容 int / 数字字符串 / 英文）。
+
+        Args:
+            val: 原始值（可能是 1 / "1" / "male" / None）。
+
+        Returns:
+            "男" | "女" | "未知"。
+        """
+        if val is None or val == "":
+            return "未知"
+        try:
+            n = int(val)
+            return {0: "未知", 1: "男", 2: "女"}.get(n, "未知")
+        except (TypeError, ValueError):
+            pass
+        s = str(val).strip().lower()
+        if s in ("male", "m", "男"):
+            return "男"
+        if s in ("female", "f", "女"):
+            return "女"
+        return "未知"
 
     def _get_locale_lang(self) -> str:
         """获取框架语言设置（兼容 config 为 dict 或 KiraConfig 对象两种情况）。"""
