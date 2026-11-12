@@ -20,6 +20,12 @@ if not (KIRAAI / "core").is_dir():
 sys.path.insert(0, str(KIRAAI))
 sys.path.insert(0, str(ROOT))
 
+# 框架日志路径相对于工作目录（data/log.log），确保存在
+try:
+    (Path.cwd() / "data").mkdir(exist_ok=True)
+except OSError:
+    pass
+
 FAIL, WARN, OK = [], [], []
 
 

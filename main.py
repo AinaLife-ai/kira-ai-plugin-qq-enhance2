@@ -461,10 +461,21 @@ class QQEnhance2Plugin(BasePlugin):
                         is_group=qq_event.extra.get("is_group", False),
                     )
             # 撤回归档后也入 store（环境摘要可见）
+            if self.debug_log:
+                logger.info(
+                    f"[QQ增强2] 收集事件 {sid}: recall "
+                    f"actor={qq_event.actor} target={qq_event.target}"
+                )
             await self.store.add(qq_event)
             return
 
         # 其他事件：入 store
+        if self.debug_log:
+            logger.info(
+                f"[QQ增强2] 收集事件 {sid}: {qq_event.etype} "
+                f"actor={qq_event.actor} target={qq_event.target} "
+                f"extra={qq_event.extra}"
+            )
         await self.store.add(qq_event)
 
     # ==================== 环境注入：llm_request 阶段 ====================
@@ -503,6 +514,11 @@ class QQEnhance2Plugin(BasePlugin):
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
                 req.user_prompt.insert(0, Prompt(env_text, name="qq_social_env", persist=False))
                 self._last_env_inject[sid] = time.time()
+                # 框架日志只打印 persist=True 的 Prompt（避免刷屏），
+                # 所以环境块默认不出现在 cmd 日志里。debug_log 开启时单独打一条，
+                # 方便确认功能是否生效。
+                if self.debug_log:
+                    logger.info(f"[QQ增强2] 注入群动态 {sid}: {env_text}")
 
         # 撤回改写（每轮执行，不受节流影响）
         await self.recall_rewriter.rewrite(
