@@ -29,6 +29,7 @@ from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
 from .qq_core.emoji_rewriter import EmojiRewriter
+from .qq_core.name_resolver import NameResolver
 from .tools.qq_profile import QQProfileTool
 from .tools.qq_group_profile import QQGroupProfileTool
 from .tools.fetch_emoji_like import FetchEmojiLikeTool
@@ -81,6 +82,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
         self.tools_fetch_emoji_like = self.plugin_cfg.get("tools_fetch_emoji_like", True)
 
+        self.resolve_nickname = self.plugin_cfg.get("resolve_nickname", True)
         self.debug_log = self.plugin_cfg.get("debug_log", False)
 
         # 运行时组件
@@ -91,6 +93,7 @@ class QQEnhance2Plugin(BasePlugin):
         self.wake_scheduler: Optional[WakeScheduler] = None
         self.locator: Optional[MessageLocator] = None
         self.emoji_rewriter: Optional[EmojiRewriter] = None
+        self.name_resolver: Optional[NameResolver] = None
         self.recall_rewriter: Optional[RecallRewriter] = None
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
 
@@ -164,6 +167,7 @@ class QQEnhance2Plugin(BasePlugin):
 
         self.recall_rewriter = RecallRewriter(locator=self.locator)
         self.emoji_rewriter = EmojiRewriter()
+        self.name_resolver = NameResolver()
 
         logger.info("[QQ增强2] 初始化完成。")
 
@@ -296,6 +300,8 @@ class QQEnhance2Plugin(BasePlugin):
         # 清空贴表情/撤回归档（模块级全局状态）
         if self.emoji_rewriter:
             self.emoji_rewriter.clear()
+        if self.name_resolver:
+            self.name_resolver.clear()
         logger.info("[QQ增强2] 已停止。")
 
     # ==================== 感知层：im_message 收集他人事件 ====================
@@ -352,8 +358,10 @@ class QQEnhance2Plugin(BasePlugin):
         if not qq_event:
             return
 
-        # 补昵称：normalizer 只解析字段，昵称由框架在构造 notice 事件时查到
-        # （KiraIMMessage.sender.nickname）。不补的话渲染会出现"用户1005()"空括号。
+        # 补昵称：框架的 notice 事件只填了 sender.nickname（= actor），
+        # **target 的昵称根本没查**（所以会出现"用户769690776(周武) 戳了戳 用户1593462500"）。
+        # 这里两层补全：① 先吃框架已查到的 actor 昵称（零成本）
+        #              ② 缺的（尤其 target）走 NameResolver（带缓存）
         try:
             sender = getattr(event.message, "sender", None)
             if sender and str(getattr(sender, "user_id", "")) == qq_event.actor:
@@ -367,8 +375,26 @@ class QQEnhance2Plugin(BasePlugin):
                     if v:
                         qq_event.actor_name = str(v)
                         break
-        except Exception:
-            pass
+
+            # 走 resolver 补 actor / target 的昵称（内部有缓存，命中零成本）
+            if self.name_resolver and self.resolve_nickname:
+                cur_adapter, _ = self._resolve_adapter(adapter_name)
+                gid_for_name = group_id or ""
+                if qq_event.actor and not qq_event.actor_name:
+                    qq_event.actor_name = await self.name_resolver.resolve(
+                        cur_adapter, adapter_name, gid_for_name, qq_event.actor,
+                    )
+                if qq_event.target and not qq_event.target_name:
+                    # 目标是自己时直接用自己昵称（避免多余请求）
+                    if self.self_id and str(qq_event.target) == str(cur_self_id):
+                        qq_event.target_name = str(getattr(sender, "nickname", "") or "") \
+                            if sender and str(getattr(sender, "user_id", "")) == str(cur_self_id) else ""
+                    if not qq_event.target_name:
+                        qq_event.target_name = await self.name_resolver.resolve(
+                            cur_adapter, adapter_name, gid_for_name, qq_event.target,
+                        )
+        except Exception as e:
+            logger.debug(f"[QQ增强2] 补昵称失败: {type(e).__name__}: {e}")
 
         # 按类型过滤
         if qq_event.etype == E_POKE and not self.collect_poke:
