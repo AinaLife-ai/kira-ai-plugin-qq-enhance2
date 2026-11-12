@@ -388,8 +388,13 @@ class WakeScheduler:
     async def _trigger_text(self, sid: str, text: str, event_type: str, actor_qq: str = ""):
         """构造 KiraMessageEvent 并 trigger（进入会话 buffer）。
 
-        所有唤醒路径的统一收口：每小时配额在这里计数，保证任何唤醒
-        （被贴表情/点赞/头衔/被踢/他人贴表情）都受 wake_max_per_hour 约束。
+        所有唤醒路径的**唯一收口**，依次检查：
+        1. 静默时段（wake_quiet_hours）
+        2. 每小时配额（wake_max_per_hour）
+        3. anti-harass 屏蔽名单
+
+        这样任何唤醒（被贴表情/点赞/头衔/被踢/他人贴表情）都受统一约束。
+        （原来静默只在 should_wake_now 里查，直接调 trigger_* 的路径绕过了它。）
 
         Args:
             sid: 会话 ID（格式: adapter:gm:group_id 或 adapter:dm:user_id）。
@@ -397,6 +402,11 @@ class WakeScheduler:
             event_type: 事件类型（用于日志）。
             actor_qq: 触发者 QQ（用于 anti-harass 屏蔽名单检查）。
         """
+        # 静默时段（统一收口，避免直接 trigger_* 绕过）
+        if self._in_quiet_hours(time.time()):
+            logger.debug(f"[QQ增强2] 唤醒被静默时段拦截: sid={sid}, type={event_type}")
+            return
+
         # 每小时配额（唯一计数点）
         if not self._check_hourly_limit(sid):
             logger.debug(f"[QQ增强2] 唤醒被每小时上限拦截: sid={sid}, type={event_type}")
