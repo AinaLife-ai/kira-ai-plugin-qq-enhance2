@@ -329,3 +329,29 @@ def test_prune_ban_expiry_bounded():
     # 小规模不动
     small = {"a": now}
     assert prune_expiry_announced(small, now) is small
+
+
+def test_profile_like_actor_fallback():
+    """点赞者字段：优先 operator_id；部分实现放 user_id → 兜底。"""
+    from qq_core.event_normalizer import normalize_notice, E_PROFILE_LIKE_SELF
+
+    # NapCat / SnowLuma
+    ev = normalize_notice(
+        {"notice_type": "notify", "sub_type": "profile_like",
+         "operator_id": 769690776, "operator_nick": "周武", "times": 10},
+        sid="s", self_id="3991867505")
+    assert ev.etype == E_PROFILE_LIKE_SELF and ev.actor == "769690776"
+
+    # 变体：只有 user_id
+    ev2 = normalize_notice(
+        {"notice_type": "notify", "sub_type": "profile_like",
+         "user_id": 1001, "times": 2},
+        sid="s", self_id="3991867505")
+    assert ev2.actor == "1001", ev2.actor
+
+    # 两者都有 → operator_id 优先
+    ev3 = normalize_notice(
+        {"notice_type": "notify", "sub_type": "profile_like",
+         "user_id": 111, "operator_id": 222, "times": 1},
+        sid="s", self_id="3991867505")
+    assert ev3.actor == "222", ev3.actor
