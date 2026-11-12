@@ -153,6 +153,46 @@ async def main():
 
     await inst.terminate()
 
+    # ===== 关键验证：开启 debug_log 不能影响 prompt / 缓存 =====
+    print("\n  === 开启 debug_log 的对照验证 ===")
+    adapter2, q2, _ = make_real_adapter(self_id=SELF_ID)
+    inst2 = await build_plugin(adapter2)
+    inst2.debug_log = True
+
+    systems2, persist_env2, env_counts2 = [], [], []
+    for turn in range(5):
+        for ev in await push_notice(adapter2, q2, make_poke(7000 + turn, 8000, GID, SELF_ID)):
+            await inst2.on_im_message(ev)
+        req3 = LLMRequest(tool_set=ToolSet())
+        req3.system_prompt = [
+            Prompt("你是一个QQ群聊机器人。", name="base", source="system"),
+            Prompt("当前群聊: 绿岛酒吧", name="chat_env", source="system"),
+        ]
+        req3.user_prompt = [Prompt(f"第{turn}轮", name="message", source="system")]
+        batch3 = KiraMessageBatchEvent(
+            supported_elements=["text"], timestamp=int(time.time()),
+            adapter=adapter2.info,
+            session=Session(adapter_name="napcat", session_type="gm", session_id=str(GID)),
+            messages=[KiraIMMessage(timestamp=1, message_id=str(turn), self_id=SELF_ID,
+                                    chain=MessageChain(), is_notice=False)],
+        )
+        await inst2.on_llm_request(batch3, req3)
+        envs = [p for p in req3.user_prompt if getattr(p, "name", "") == "qq_social_env"]
+        env_counts2.append(len(envs))
+        persist_env2.extend(getattr(p, "persist", True) for p in envs)
+        req3.assemble_prompt(dynamic_position="latest_user")
+        systems2.append(next((m.content for m in req3.messages if m.role == "system"), ""))
+
+    print(f"  开启 debug_log：每轮环境块 {env_counts2}，persist={set(persist_env2)}")
+    check("开启 debug_log 后 system prompt 仍一致（缓存不受影响）",
+          len(set(systems2)) == 1, f"{len(set(systems2))} 种")
+    check("开启 debug_log 后环境块仍 persist=False",
+          all(p is False for p in persist_env2), str(set(persist_env2)))
+    check("开启 debug_log 后每轮仍恰好 1 个环境块",
+          all(c == 1 for c in env_counts2), str(env_counts2))
+
+    await inst2.terminate()
+
 
 asyncio.run(main())
 
