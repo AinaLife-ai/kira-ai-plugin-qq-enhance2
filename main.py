@@ -103,10 +103,25 @@ class QQEnhance2Plugin(BasePlugin):
         # 收集所有 QQ 适配器
         self._adapters: dict[str, tuple] = {}   # adapter_name → (adapter, self_id)
         for ada in self.ctx.adapter_mgr.get_all_adapters():
-            if getattr(ada, "platform", None) != "QQ":
+            # 平台字段位置因实现而异：
+            # - 真实 QQAdapter（框架 3.x）：ada.info.platform（BaseAdapter 无 platform 属性）
+            # - 部分实现可能直接暴露 ada.platform
+            platform = (
+                getattr(getattr(ada, "info", None), "platform", None)
+                or getattr(ada, "platform", None)
+                or ""
+            )
+            if str(platform).upper() != "QQ":
                 continue
-            name = getattr(getattr(ada, "info", None), "name", None) or getattr(ada, "name", "")
-            sid_self = str((getattr(ada, "config", None) or {}).get("self_id", "") or "")
+            info = getattr(ada, "info", None)
+            name = (
+                getattr(info, "name", None)
+                or getattr(ada, "name", None)
+                or getattr(info, "adapter_id", None)
+                or ""
+            )
+            cfg = getattr(ada, "config", None) or getattr(info, "config", None) or {}
+            sid_self = str(cfg.get("self_id", "") or "") if isinstance(cfg, dict) else ""
             if name:
                 self._adapters[name] = (ada, sid_self)
 
