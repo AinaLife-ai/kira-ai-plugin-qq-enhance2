@@ -219,24 +219,27 @@ def test_bug6_sid_parse_for_role():
 # ============ Bug 7: anti-harass 名单格式 ============
 
 def test_bug7_blocklist_format():
-    """屏蔽名单按 {sid}|{uid}|{kind} 解析，按用户检查。"""
+    """屏蔽名单按 {sid}|{uid}|{kind} 解析，支持三级匹配（全局/会话/用户）。"""
     sched, ctx = _make_scheduler()
 
-    # 直接注入名单（模拟 _load_blocklist 结果）
     now = time.time()
     sched._harass_blocklist = {
-        "napcat:gm:1|1001|all": now + 3600,      # 屏蔽 1001 全部
-        "napcat:gm:1|1002|poke": now + 3600,     # 屏蔽 1002 戳一戳
+        "napcat:gm:1|1001|all": now + 3600,      # 用户级拉黑
+        "napcat:gm:1|1002|poke": now + 3600,     # 用户级 poke 屏蔽（不算拉黑）
+        "napcat:gm:2|*|all": now + 3600,         # 会话级拉黑
+        "*|1004|all": now + 3600,                # 全局拉黑
         "napcat:gm:1|1003|all": now - 10,        # 已过期
     }
     sched._last_blocklist_load = now
 
-    assert _run(sched._is_blocked("napcat:gm:1", "1001")) is True, "1001 应被屏蔽"
-    assert _run(sched._is_blocked("napcat:gm:1", "1002")) is True, "1002 应被屏蔽"
+    assert _run(sched._is_blocked("napcat:gm:1", "1001")) is True, "用户级拉黑应拦截"
+    assert _run(sched._is_blocked("napcat:gm:1", "1002")) is False, "poke 屏蔽不算拉黑（对齐 Z）"
+    assert _run(sched._is_blocked("napcat:gm:2", "9999")) is True, "会话级拉黑应拦截该会话所有用户"
+    assert _run(sched._is_blocked("napcat:gm:3", "1004")) is True, "全局拉黑应拦截"
     assert _run(sched._is_blocked("napcat:gm:1", "1003")) is False, "过期不应屏蔽"
     assert _run(sched._is_blocked("napcat:gm:1", "9999")) is False, "未屏蔽用户"
     assert _run(sched._is_blocked("napcat:gm:1", "")) is False, "无 actor 不屏蔽"
-    print("  ✓ Bug7 修复确认：屏蔽名单按用户匹配")
+    print("  ✓ Bug7 修复确认：三级匹配（全局/会话/用户）+ poke 不算拉黑")
 
 
 # ============ Bug 8: recall_show_content 生效 ============

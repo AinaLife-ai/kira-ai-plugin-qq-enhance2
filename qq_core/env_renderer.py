@@ -67,68 +67,44 @@ def render_env_summary(
     if not events:
         return ""
 
-    # 按类型分组
-    by_type: dict[str, list[QQEvent]] = {}
-    for ev in events:
-        by_type.setdefault(ev.etype, []).append(ev)
-
-    # 每组按时间倒序（新事件在前）
-    for et in by_type:
-        by_type[et].sort(key=lambda e: e.ts, reverse=True)
-
-    # 类型排序：最近活跃度（该类型最新事件时间）降序
-    type_order = sorted(
-        by_type.keys(),
-        key=lambda et: by_type[et][0].ts if by_type[et] else 0,
-        reverse=True,
-    )
-
-    # 渲染候选文本（分层预算：每类型 ≤ max_per_type 条）
-    lines = []
-    for et in type_order:
-        ev_list = by_type[et][:max_per_type]
-        if not ev_list:
-            continue
-        rendered = _render_type(et, ev_list)
-        if rendered:
-            lines.append(rendered)
-
-    if not lines:
-        return ""
-
-    # 拼接候选文本
+    # 拼接候选文本（类型条目用 ①②③ 编号，分隔符用 ；）
     header = _time_prefix(events)
-    candidate = header + " " + " ".join(lines) if header else " ".join(lines)
 
-    # 踢旧淘汰：超限从最旧事件整条删除
-    if len(candidate) > max_chars:
-        # 重新渲染（逐步删除最旧事件）
-        while len(candidate) > max_chars and events:
-            events = events[1:]  # 删除最旧事件
-            by_type = {}
-            for ev in events:
-                by_type.setdefault(ev.etype, []).append(ev)
-            for et in by_type:
-                by_type[et].sort(key=lambda e: e.ts, reverse=True)
-            type_order = sorted(
-                by_type.keys(),
-                key=lambda et: by_type[et][0].ts if by_type[et] else 0,
-                reverse=True,
-            )
-            lines = []
-            for et in type_order:
-                ev_list = by_type[et][:max_per_type]
-                if not ev_list:
-                    continue
-                rendered = _render_type(et, ev_list)
-                if rendered:
-                    lines.append(rendered)
-            if not lines:
-                return ""
-            header = _time_prefix(events)
-            candidate = header + " " + " ".join(lines) if header else " ".join(lines)
+    def _assemble(evts: list[QQEvent]) -> str:
+        """按当前事件集合渲染并编号拼接。"""
+        by_t: dict[str, list[QQEvent]] = {}
+        for ev in evts:
+            by_t.setdefault(ev.etype, []).append(ev)
+        for et in by_t:
+            by_t[et].sort(key=lambda e: e.ts, reverse=True)
+        order = sorted(
+            by_t.keys(),
+            key=lambda et: by_t[et][0].ts if by_t[et] else 0,
+            reverse=True,
+        )
+        parts = []
+        for et in order:
+            rendered = _render_type(et, by_t[et][:max_per_type])
+            if rendered:
+                parts.append(rendered)
+        if not parts:
+            return ""
+        circled = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+        numbered = []
+        for i, p in enumerate(parts):
+            mark = circled[i] if i < len(circled) else f"({i + 1})"
+            numbered.append(f"{mark}{p}")
+        body = "；".join(numbered)
+        return f"{header} {body}" if header else body
 
-    return candidate
+    candidate = _assemble(events)
+
+    # 踢旧淘汰：超限从最旧事件整条删除（不是截断字符串）
+    while len(candidate) > max_chars and len(events) > 1:
+        events = events[1:]
+        candidate = _assemble(events)
+
+    return candidate if len(candidate) <= max_chars or len(events) == 1 else candidate
 
 
 def _render_type(etype: str, events: list[QQEvent]) -> str:
@@ -153,15 +129,14 @@ def _render_type(etype: str, events: list[QQEvent]) -> str:
     elif etype == E_EMOJI_LIKE:
         # 合并：按 (actor, target_message_author) 归并
         # 注意：target_message_author 需 message_locator 反查（此处 events 已带 target/target_name）
+        from .emoji_display import format_emoji_list
         parts = []
         for ev in events:
             emoji_ids = ev.extra.get("emoji_ids", [])
             count = ev.extra.get("count", 1)
             msg_id = ev.extra.get("message_id", "")
-            emoji_str = "/".join(emoji_ids) if emoji_ids else "?"
-            part = f"{_fmt_user(ev.actor, ev.actor_name)} 给 {_fmt_user(ev.target, ev.target_name)} 的消息贴了{emoji_str}"
-            if count > 1:
-                part += f"×{count}"
+            emoji_str = format_emoji_list(emoji_ids, count)
+            part = f"{_fmt_user(ev.actor, ev.actor_name)} 给 {_fmt_user(ev.target, ev.target_name)} 的消息贴了 {emoji_str}"
             if msg_id:
                 part += f"(msg:{msg_id[:8]}...)"
             parts.append(part)

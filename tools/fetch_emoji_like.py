@@ -15,6 +15,35 @@ from core.plugin import PluginContext
 
 logger = get_logger("qq_enhance2.fetch_emoji_like", "cyan")
 
+# 表情显示（容错导入：独立测试环境无 qq_core 包）
+def _load_format_emoji():
+    """动态加载 qq_core.emoji_display.format_emoji（兼容多种加载方式）。"""
+    try:
+        from qq_core.emoji_display import format_emoji as f
+        return f
+    except ImportError:
+        pass
+    # 框架内加载时，插件是 plugins.<dirname> 的子包
+    try:
+        import importlib
+        pkg_parts = __name__.split(".")
+        if len(pkg_parts) >= 2:
+            # __name__ = plugins.<dirname>.tools.fetch_emoji_like → plugins.<dirname>.qq_core
+            parent_pkg = ".".join(pkg_parts[:-2])
+            mod = importlib.import_module(f"{parent_pkg}.qq_core.emoji_display")
+            return mod.format_emoji
+    except Exception:
+        pass
+
+    def _fallback(emoji_id: str) -> str:
+        """降级：无 qq_core 时仅输出 ID（保证不崩，仍可回贴）。"""
+        return f"ID: {emoji_id}" if emoji_id else ""
+
+    return _fallback
+
+
+format_emoji = _load_format_emoji()
+
 
 class FetchEmojiLikeTool(BaseTool):
     """贴表情查询工具。"""
@@ -92,15 +121,14 @@ class FetchEmojiLikeTool(BaseTool):
             if not result_list:
                 return "未找到贴表情回应。"
 
-            # 格式化结果
+            # 格式化结果（表情带中文名 + ID，方便 bot 回贴/跟贴）
             result = f"消息 {message_id} 的贴表情回应：\n"
             for item in result_list:
                 tiny_id = item.get("tinyId") or ""
                 nick_name = item.get("nickName") or ""
-                head_url = item.get("headUrl") or ""
                 emoji_id_val = item.get("emojiId") or item.get("emoji_id") or ""
                 count = item.get("count") or 1
-                result += f"  用户 {tiny_id}({nick_name}) 贴了 {emoji_id_val} ×{count}\n"
+                result += f"  用户 {tiny_id}({nick_name}) 贴了 {format_emoji(emoji_id_val)} ×{count}\n"
 
             # 分页信息
             cookie_next = data.get("cookie") or ""

@@ -169,20 +169,28 @@ class MessageLocator:
             sub_type: 事件子类型。
             is_group: 是否群聊。
         """
-        # 判定操作者身份
+        # 判定操作者身份（区分具体动作差别）
         if operator == sender:
             action_desc = "撤回了自己的一条消息"
+            role_prefix = ""
         else:
             # 检查是否是群主/管理员（需 get_group_member_info）
             role = await self._get_group_member_role(sid, operator)
             if role == "owner":
-                action_desc = "(群主) 撤回了一条消息"
+                action_desc = "撤回了此消息"
+                role_prefix = "(群主)"
             elif role == "admin":
-                action_desc = "(管理员) 撤回了一条消息"
+                action_desc = "撤回了此消息"
+                role_prefix = "(管理员)"
             else:
-                action_desc = "撤回了一条消息"
+                action_desc = "撤回了此消息"
+                role_prefix = ""
 
-        annotation = f"\n[已撤回｜{_fmt_user(operator, operator_name)} {action_desc}]"
+        # 标注格式：用户{QQ}({昵称}){角色前缀} {动作}
+        if role_prefix:
+            annotation = f"\n[已撤回｜{_fmt_user(operator, operator_name)}{role_prefix} {action_desc}]"
+        else:
+            annotation = f"\n[已撤回｜{_fmt_user(operator, operator_name)} {action_desc}]"
 
         async with self._lock:
             recall_list = self._recall_store.setdefault(sid, [])

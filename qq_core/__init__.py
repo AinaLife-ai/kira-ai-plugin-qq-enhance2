@@ -9,10 +9,15 @@ __init__ 只导入纯模块，框架依赖模块由 main.py 按需导入，避�
 from .event_normalizer import QQEvent, normalize_notice
 from .event_store import EventStore
 from .env_renderer import render_env_summary
+from .emoji_display import format_emoji, format_emoji_list
+from .emoji_dict import get_emoji_name
 
 __all__ = [
     "QQEvent",
     "normalize_notice",
     "EventStore",
     "render_env_summary",
+    "format_emoji",
+    "format_emoji_list",
+    "get_emoji_name",
 ]

@@ -19,6 +19,7 @@ from typing import Optional
 
 from core.logging_manager import get_logger
 from core.chat import KiraMessageEvent, KiraIMMessage, MessageChain
+from core.chat.message_elements import Text
 from core.chat.session import Session, Group, User
 from core.adapter.adapter_info import AdapterInfo
 
@@ -171,9 +172,10 @@ class WakeScheduler:
 
         emoji_ids = event.extra.get("emoji_ids", [])
         count = event.extra.get("count", 1)
-        from .emoji_dict import get_emoji_name
-        emoji_str = "/".join(get_emoji_name(e) for e in emoji_ids) if emoji_ids else "?"
-        text = f"[System 用户{event.actor}({event.actor_name}) 给用户{message_author}({message_author_name})的消息贴了{emoji_str}×{count}"
+        from .emoji_display import format_emoji_list
+        emoji_str = format_emoji_list(emoji_ids, count)
+        # 对齐框架 [Emoji {desc} (ID: {id})] 格式：bot 拿到 ID 才能回贴
+        text = f"[System 用户{event.actor}({event.actor_name}) 给用户{message_author}({message_author_name})的消息贴了 {emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -313,8 +315,9 @@ class WakeScheduler:
         """
         emoji_ids = event.extra.get("emoji_ids", [])
         count = event.extra.get("count", 1)
-        emoji_str = "/".join(emoji_ids) if emoji_ids else "?"
-        text = f"[System 用户{event.actor}({event.actor_name}) 给你贴了{emoji_str}×{count}"
+        from .emoji_display import format_emoji_list
+        emoji_str = format_emoji_list(emoji_ids, count)
+        text = f"[System 用户{event.actor}({event.actor_name}) 给你贴了 {emoji_str}"
         if msg_excerpt:
             text += f"（\"{msg_excerpt[:20]}...\"）"
         text += "]"
@@ -371,7 +374,9 @@ class WakeScheduler:
             group = Group(group_id=session_id)
 
         user = User(user_id="system_qq_enhance2", nickname="系统唤醒")
-        chain = MessageChain([text])
+        # 注意：MessageChain 只接受 BaseMessageElement，不能直接传 str
+        # （框架 KiraMessageEvent.__post_init__ 会访问 ele.repr，传 str 会崩）
+        chain = MessageChain([Text(text)])
 
         event = KiraMessageEvent(
             adapter=adapter_info.info,
@@ -401,19 +406,22 @@ class WakeScheduler:
         await self.ctx.event_bus.publish(event)
         logger.info(f"[QQ增强2] 唤醒已触发: sid={sid}, type={event_type}")
 
-    async def _is_blocked(self, sid: str, actor_qq: str = "") -> bool:
-        """检查触发者是否被 anti-harass 屏蔽。
+    async def _is_blocked(self, sid: str, actor_qq: str = "", kind: str = "all") -> bool:
+        """检查触发者是否被 anti-harass / S / Z 的屏蔽名单拦截。
 
-        anti-harass 的屏蔽是**针对用户**的（屏蔽某人发言），因此要检查
-        触发本次唤醒的具体用户（贴表情的人/点赞的人）是否在屏蔽名单里。
+        对齐 S/Z 的 `is_blocked` 语义（default_chat_z/chat_enhance.py:396）：
+        屏蔽名单是 **{sid}|{uid}|{kind} → expire_ts** 的三元组，匹配分三级：
+          1. 全局屏蔽     `*|*|kind`        → 所有会话所有用户
+          2. 会话级屏蔽   `{sid}|*|kind`    → 该会话所有用户
+          3. 用户级屏蔽   `{sid}|{uid}|kind` → 该会话该用户
 
-        anti-harass 持久化格式（ignore_list.json）：
-            {"{sid}|{uid}|{kind}": expire_ts, ...}
-        其中 kind ∈ {"poke", "all"}（"all" 表示拉黑该用户全部消息）。
+        注意：`kind == "poke"` 的屏蔽**只挡戳一戳通知，不算拉黑**，
+        因此不能用它来拦截"贴表情/点赞/头衔"这类唤醒（对齐 Z 的实现）。
 
         Args:
             sid: 会话 ID（adapter:gm:group_id）。
             actor_qq: 触发者 QQ 号。
+            kind: 屏蔽类型（默认 "all" = 拉黑语义）。
 
         Returns:
             True = 被屏蔽（不应唤醒）；False = 未被屏蔽。
@@ -427,38 +435,45 @@ class WakeScheduler:
         if not actor_qq:
             return False
 
-        # 匹配 {sid}|{actor_qq}|* 的任意 kind（poke / all）
+        # 三级匹配（对齐 S/Z 的 is_blocked）：拉黑语义，跳过 poke 类屏蔽
         for key, expire in self._harass_blocklist.items():
             if expire <= now:
                 continue
             parts = key.split("|")
             if len(parts) != 3:
                 continue
-            k_sid, k_uid, _kind = parts
-            if k_uid == actor_qq and (k_sid == sid or k_sid == "*"):
-                return True
+            k_sid, k_uid, k_kind = parts
+            if k_kind == "poke":
+                # poke 屏蔽只挡戳一戳通知，不拉黑该用户的其他行为
+                continue
+            if k_sid not in ("*", sid):
+                continue
+            if k_uid not in ("*", actor_qq):
+                continue
+            return True
         return False
 
     async def _load_blocklist(self):
-        """加载 anti-harass 屏蔽名单。
+        """加载屏蔽名单（anti-harass 插件的持久化文件）。
 
-        文件格式（anti-harass 的 data/ignore_list.json）：
-            {"{sid}|{uid}|{kind}": expire_ts, ...}
-        键的三段：会话 sid、用户 QQ、屏蔽类型（poke/all）。
+        anti-harass 把屏蔽名单写在 `data/plugin_data/{plugin_id}/ignore_list.json`，
+        格式为 `{"{sid}|{uid}|{kind}": expire_ts}`（与 S/Z 内存态 `_ignored` 同构）。
+
+        S/Z 的屏蔽名单是纯内存态（不落盘），无法直接读取——这是已知限制：
+        只有 anti-harass 插件持久化了名单，我们兼容它即可。
+
+        路径探测：遍历 plugin_data 下的目录，找第一个含 ignore_list.json 的。
         """
         try:
-            data_dir = self.ctx.get_plugin_data_dir()
-            if not data_dir:
+            base = self._plugin_data_base()
+            if not base or not os.path.isdir(base):
                 return
-            # anti-harass 的插件数据目录与我们的不同，按插件 id 定位
-            import os as _os
-            base = _os.path.dirname(str(data_dir))  # plugin_data/
-            candidates = [
-                _os.path.join(base, "KiraAI-anti-harass-plugin", "ignore_list.json"),
-                _os.path.join(base, "anti-harass", "ignore_list.json"),
-                _os.path.join(base, "anti_harass", "ignore_list.json"),
-            ]
-            path = next((p for p in candidates if _os.path.exists(p)), None)
+            path = None
+            for name in sorted(os.listdir(base)):
+                cand = os.path.join(base, name, "ignore_list.json")
+                if os.path.exists(cand):
+                    path = cand
+                    break
             if not path:
                 return
             with open(path, "r", encoding="utf-8") as f:
@@ -467,7 +482,7 @@ class WakeScheduler:
                 return
             self._harass_blocklist = {}
             for key, val in data.items():
-                if not isinstance(key, str) or "|" not in key:
+                if not isinstance(key, str) or key.count("|") != 2:
                     continue
                 try:
                     expire = float(val)
@@ -476,3 +491,14 @@ class WakeScheduler:
                 self._harass_blocklist[key] = expire
         except Exception:
             pass
+
+    def _plugin_data_base(self) -> str:
+        """定位 plugin_data 根目录（不依赖调用方 plugin_id）。"""
+        try:
+            d = self.ctx.get_plugin_data_dir()
+            if d:
+                # get_plugin_data_dir 返回的是本插件的目录，上一级就是 plugin_data/
+                return os.path.dirname(str(d))
+        except Exception:
+            pass
+        return ""

@@ -77,7 +77,7 @@ def _install_framework_stubs():
     core.adapter = adapter_pkg
     adapter_pkg.adapter_info = adapter_info
 
-    # KiraMessageEvent / KiraIMMessage / MessageChain 最小实现
+    # KiraMessageEvent / KiraIMMessage / MessageChain / Text 最小实现
     class _Chain:
         def __init__(self, elements=None):
             self.message_list = elements or []
@@ -101,6 +101,18 @@ def _install_framework_stubs():
     chat.KiraMessageEvent = _MessageEvent
     chat.KiraIMMessage = _IMMessage
     chat.MessageChain = _Chain
+
+    # message_elements.Text（_trigger_text 需要）
+    msg_elements = types.ModuleType("core.chat.message_elements")
+    class _Text:
+        def __init__(self, text=""):
+            self.text = text
+        @property
+        def repr(self):
+            return self.text
+    msg_elements.Text = _Text
+    sys.modules["core.chat.message_elements"] = msg_elements
+    chat.message_elements = msg_elements
 
 _install_framework_stubs()
 

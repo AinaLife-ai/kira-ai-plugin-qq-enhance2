@@ -44,14 +44,11 @@ def _build_annotation(sub_entries: list[dict]) -> str:
     Returns:
         标注文本（多行）。
     """
-    from .emoji_dict import get_emoji_name
+    from .emoji_display import format_emoji_list
     parts = []
     for sub in sub_entries:
-        emoji_str = "/".join(get_emoji_name(e) for e in sub.get("emoji_ids", [])) or "?"
-        cnt = sub.get("count", 1)
-        if cnt > 1:
-            emoji_str += f"×{cnt}"
-        parts.append(f"用户{sub.get('operator', '')}({sub.get('operator_name', '')}) 贴了{emoji_str}")
+        emoji_str = format_emoji_list(sub.get("emoji_ids", []), sub.get("count", 1))
+        parts.append(f"用户{sub.get('operator', '')}({sub.get('operator_name', '')}) 贴了 {emoji_str}")
     return "\n[贴表情｜" + "；".join(parts) + "]"
 
 
@@ -80,13 +77,11 @@ def archive_emoji_like(
     """
     if not message_id:
         return
-    # 表情显示：优先 emoji_dict 中文名，否则 emoji_id
-    from .emoji_dict import get_emoji_name
-    emoji_str = "/".join(get_emoji_name(e) for e in emoji_ids) if emoji_ids else "?"
-    if count > 1:
-        emoji_str += f"×{count}"
+    # 表情显示：对齐框架 [Emoji {desc} (ID: {id})] 格式，保留 ID 供回贴
+    from .emoji_display import format_emoji_list
+    emoji_str = format_emoji_list(emoji_ids, count)
 
-    annotation = f"\n[贴表情｜用户{operator}({operator_name}) 贴了{emoji_str}]"
+    annotation = f"\n[贴表情｜用户{operator}({operator_name}) 贴了 {emoji_str}]"
 
     store = _EMOJI_STORE.setdefault(sid, [])
     # 同一 message_id 合并标注（多条贴表情合并为一条）
