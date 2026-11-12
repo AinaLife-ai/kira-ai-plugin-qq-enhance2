@@ -101,30 +101,21 @@ class QQEnhance2Plugin(BasePlugin):
         事件处理时按 event.adapter.name / sid 动态取对应适配器，
         避免"用第一个号的身份处理第二个号的事件"。
         """
-        # 收集所有 QQ 适配器
+        # 收集所有 QQ 适配器（按真实 AdapterManager API）
         self._adapters: dict[str, tuple] = {}   # adapter_name → (adapter, self_id)
-        for ada in self.ctx.adapter_mgr.get_all_adapters():
-            # 平台字段位置因实现而异：
-            # - 真实 QQAdapter（框架 3.x）：ada.info.platform（BaseAdapter 无 platform 属性）
-            # - 部分实现可能直接暴露 ada.platform
-            platform = (
-                getattr(getattr(ada, "info", None), "platform", None)
-                or getattr(ada, "platform", None)
-                or ""
-            )
-            if str(platform).upper() != "QQ":
-                continue
-            info = getattr(ada, "info", None)
+        for ada, info in self._iter_qq_adapters():
             name = (
                 getattr(info, "name", None)
                 or getattr(ada, "name", None)
                 or getattr(info, "adapter_id", None)
                 or ""
             )
-            cfg = getattr(ada, "config", None) or getattr(info, "config", None) or {}
+            if not name:
+                continue
+            cfg = (getattr(ada, "config", None)
+                   or getattr(info, "config", None) or {})
             sid_self = str(cfg.get("self_id", "") or "") if isinstance(cfg, dict) else ""
-            if name:
-                self._adapters[name] = (ada, sid_self)
+            self._adapters[name] = (ada, sid_self)
 
         if not self._adapters:
             logger.warning("[QQ增强2] 未找到 QQ 适配器，插件降级运行。")
@@ -175,6 +166,97 @@ class QQEnhance2Plugin(BasePlugin):
         self.emoji_rewriter = EmojiRewriter()
 
         logger.info("[QQ增强2] 初始化完成。")
+
+    def _iter_qq_adapters(self):
+        """遍历已启动的 QQ 适配器，产出 (adapter_instance, info)。
+
+        **真实 AdapterManager 没有 `get_all_adapters()`**（3.1.2 / 3.2.0 实测）：
+          · `get_adapters()`      → dict[str, BaseAdapter]（已启动的实例）★首选
+          · `get_adapters_info()` → list[AdapterInfo]（含未启用的，来自配置）
+          · `get_adapter(name)`   → BaseAdapter | None
+          · `get_adapter_infos()` → get_adapters_info 的 deprecated 别名
+
+        多路径兼容（首选最直接的）：
+        1. get_adapters() → dict
+        2. get_adapters_info() / get_adapter_infos() + get_adapter(name)
+        3. get_all_adapters()（旧实现 / 测试替身）
+        4. 内部 _adapters dict（最后手段）
+
+        Yields:
+            (adapter, info) 元组，只含平台为 QQ 的。
+        """
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if mgr is None:
+            return
+
+        def _is_qq(ada, info) -> bool:
+            platform = (getattr(info, "platform", None)
+                        or getattr(ada, "platform", None) or "")
+            return str(platform).upper() == "QQ"
+
+        # 路径 1：get_adapters() → dict[str, adapter]（最直接）
+        fn_dict = getattr(mgr, "get_adapters", None)
+        if callable(fn_dict):
+            try:
+                mapping = fn_dict()
+                if isinstance(mapping, dict):
+                    for ada in mapping.values():
+                        info = getattr(ada, "info", None)
+                        if _is_qq(ada, info):
+                            yield ada, info
+                    return
+            except Exception:
+                pass
+
+        # 路径 2：info 列表 + get_adapter(name)
+        infos = None
+        for getter in ("get_adapters_info", "get_adapter_infos"):
+            fn = getattr(mgr, getter, None)
+            if callable(fn):
+                try:
+                    infos = fn()
+                    if isinstance(infos, list):
+                        break
+                except Exception:
+                    infos = None
+        if isinstance(infos, list):
+            get_one = getattr(mgr, "get_adapter", None)
+            for info in infos:
+                if str(getattr(info, "platform", None) or "").upper() != "QQ":
+                    continue
+                if not bool(getattr(info, "enabled", True)):
+                    continue
+                inst = None
+                if callable(get_one):
+                    try:
+                        inst = get_one(
+                            getattr(info, "name", "") or getattr(info, "adapter_id", "")
+                        )
+                    except Exception:
+                        inst = None
+                if inst is not None:
+                    yield inst, info
+            return
+
+        # 路径 3：旧实现 / 测试替身
+        get_all = getattr(mgr, "get_all_adapters", None)
+        if callable(get_all):
+            try:
+                for ada in get_all() or []:
+                    info = getattr(ada, "info", None)
+                    if _is_qq(ada, info):
+                        yield ada, info
+                return
+            except Exception:
+                pass
+
+        # 路径 4：内部 dict
+        raw = getattr(mgr, "_adapters", None)
+        if isinstance(raw, dict):
+            for ada in raw.values():
+                info = getattr(ada, "info", None)
+                if _is_qq(ada, info):
+                    yield ada, info
 
     def _resolve_adapter(self, adapter_name: str):
         """按适配器名取 (adapter, self_id)；找不到时回退默认。
@@ -379,10 +461,21 @@ class QQEnhance2Plugin(BasePlugin):
                         is_group=qq_event.extra.get("is_group", False),
                     )
             # 撤回归档后也入 store（环境摘要可见）
+            if self.debug_log:
+                logger.info(
+                    f"[QQ增强2] 收集事件 {sid}: recall "
+                    f"actor={qq_event.actor} target={qq_event.target}"
+                )
             await self.store.add(qq_event)
             return
 
         # 其他事件：入 store
+        if self.debug_log:
+            logger.info(
+                f"[QQ增强2] 收集事件 {sid}: {qq_event.etype} "
+                f"actor={qq_event.actor} target={qq_event.target} "
+                f"extra={qq_event.extra}"
+            )
         await self.store.add(qq_event)
 
     # ==================== 环境注入：llm_request 阶段 ====================
@@ -421,6 +514,11 @@ class QQEnhance2Plugin(BasePlugin):
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
                 req.user_prompt.insert(0, Prompt(env_text, name="qq_social_env", persist=False))
                 self._last_env_inject[sid] = time.time()
+                # 框架日志只打印 persist=True 的 Prompt（避免刷屏），
+                # 所以环境块默认不出现在 cmd 日志里。debug_log 开启时单独打一条，
+                # 方便确认功能是否生效。
+                if self.debug_log:
+                    logger.info(f"[QQ增强2] 注入群动态 {sid}: {env_text}")
 
         # 撤回改写（每轮执行，不受节流影响）
         await self.recall_rewriter.rewrite(

@@ -61,7 +61,7 @@ async def build_plugin(adapter, cfg_overrides=None):
     context.tool_mgr = None
     context.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: adapter),
-        "get_all_adapters": staticmethod(lambda: [adapter]),
+        "get_adapters": staticmethod(lambda: {adapter.info.name: adapter}),
     })()
     published = []
 

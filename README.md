@@ -88,7 +88,7 @@
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `debug_log` | false | 输出详细调试日志 |
+| `debug_log` | false | 调试日志：打印事件收集与群动态注入（框架默认不打印群动态） |
 
 ## 兼容性
 
@@ -121,8 +121,73 @@
   在 WebUI 中改完配置后，请禁用再启用本插件（或重启框架）。
 - **多 QQ 号部署**：支持多适配器，每个号的 notice 会用自己账号的 `self_id` 判断，
   工具也绑定到当前会话所属账号（不会用错号发 API）。
+- **群动态在控制台看不到是正常的**：环境摘要以 `persist=False` 注入 prompt
+  （不进历史、不破坏缓存），而框架只打印 `persist=True` 的内容，
+  所以 cmd 日志里不会出现 `[群动态·...]`。
+  想确认功能是否生效，把 `debug_log` 打开，会打印：
+  ```
+  [QQ增强2] 收集事件 napcat:gm:123: poke actor=1001 target=2002
+  [QQ增强2] 注入群动态 napcat:gm:123: [群动态·刚刚] 用户1001(张三) 戳了戳 用户2002(李四)
+  ```
 - **数据存储**：`data/plugin_data/kira-ai-plugin-qq-enhance2/` 下按会话存 JSON
   （每会话最多 20 条事件，30 秒落盘一次，24 小时 TTL）。
+
+## 更新日志
+
+<details>
+<summary><b>v1.0.1</b>（2026-11-12）— 修复实机安装失败</summary>
+
+### 🐛 修复
+- **修复实机安装后插件初始化失败**：`'AdapterManager' object has no attribute 'get_all_adapters'`。
+  真实框架的 `AdapterManager` 只有 `get_adapters()`（返回 `dict[str, BaseAdapter]`）
+  和 `get_adapters_info()`（返回配置列表），**没有** `get_all_adapters()`。
+  改为多路径兼容：`get_adapters()` → `get_adapters_info()` + `get_adapter()` → 兜底。
+  （此前测试都用自造 mock，掩盖了这个问题；已同步修正所有测试 mock 并新增
+  `tests/real_api_check.py` 用真实类反射核对全部框架 API 调用。）
+
+### ✅ 兼容性
+- 实测通过 **KiraAI v3.1.2** 与 **v3.2.0-beta.1** 两个版本的全量验证。
+
+### 🔍 新增调试能力
+- `debug_log` 开关现在真正生效（此前是死配置）：开启后打印
+  「事件收集」与「群动态注入」日志，方便确认功能是否在工作。
+
+</details>
+
+<details>
+<summary><b>v1.0.0</b>（2026-11-12）— 首个版本</summary>
+
+### ✨ 新增
+
+**感知层（他人事件）**
+- 戳一戳 / 贴表情 / 禁言 / 撤回 / 退群 等他人事件收集
+- 合并为紧凑环境摘要（带 QQ 号：`用户{QQ}({昵称})`）
+- 分层预算渲染：超限时从最旧事件整条删除，不截断字符串
+
+**唤醒层（自己相关）**
+- 被贴表情 / 资料卡被赞 / 头衔授予 / 被移出群 → 唤醒
+- 点赞合并防抖（同用户 10 秒窗口合并）
+- 每小时上限 60 次（-1 无限制），支持静默时段
+- 他人消息被贴表情可选唤醒（默认关，冷却 20 秒）
+
+**改写**
+- 撤回消息原文下追加标注（区分本人 / 管理员 / 群主操作）
+- 他人消息被贴表情同样改写原文标注（带表情 ID，方便回贴）
+
+**工具**
+- `qq_profile`：读写合体（昵称 / 签名 / 性别 / **头像**）
+- `qq_group_profile`：读写合体（群名片 / 头衔 / **群头像**）
+- `fetch_emoji_like`：贴表情查询（分页）
+
+**安全**
+- 昵称净化：防 prompt 注入（`<system>...`）、防破坏单行结构、
+  保留 emoji ZWJ 组合、超长截断
+
+### 🔒 兼容
+- NapCat / LLOneBot / SnowLuma 三家协议端
+- QQ增强1 / S / Z / 默认聊天 / JEV / anti-harass / group_manager 等 10+ 插件
+
+</details>
 
 ## 许可
 

@@ -65,10 +65,11 @@ class Ctx:
         self._adapters = adapters
 
         class Mgr:
+            """模拟真实 AdapterManager：get_adapters() → dict（无 get_all_adapters）。"""
             def __init__(self, ads):
                 self._ads = ads
-            def get_all_adapters(self):
-                return list(self._ads)
+            def get_adapters(self):
+                return {getattr(getattr(a, "info", None), "name", ""): a for a in self._ads}
             def get_adapter(self, name):
                 # 真实 BaseAdapter 用 info.name（没有 .name 属性）
                 for a in self._ads:
@@ -99,7 +100,7 @@ from qq_core.wake_scheduler import WakeScheduler
 
 # 模拟 main.py 的 _adapters 构建逻辑（与 main.py 保持一致的平台检测）
 adapters_map = {}
-for ada in ctx.adapter_mgr.get_all_adapters():
+for ada in ctx.adapter_mgr.get_adapters().values():
     platform = (
         getattr(getattr(ada, "info", None), "platform", None)
         or getattr(ada, "platform", None)
