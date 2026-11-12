@@ -176,6 +176,12 @@
         "default": true,
         "hint": "启用 fetch_emoji_like 工具"
     },
+    "resolve_nickname": {
+        "name": "补全事件昵称",
+        "type": "switch",
+        "default": true,
+        "hint": "框架的 notice 事件只带发起人昵称，被戳/被禁言/被贴表情的 target 没有昵称。开启后自动查询补全（带 10 分钟缓存），关闭则 target 只显示 QQ 号"
+    },
     "debug_log": {
         "name": "调试日志",
         "type": "switch",
