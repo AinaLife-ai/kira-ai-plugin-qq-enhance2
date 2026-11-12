@@ -157,7 +157,7 @@ async def test_wake_event():
     ctx.tool_mgr = None
     ctx.adapter_mgr = type("AM", (), {
         "get_adapter": staticmethod(lambda n: a),
-        "get_all_adapters": staticmethod(lambda: [a]),
+        "get_adapters": staticmethod(lambda: {a.info.name: a}),
     })()
 
     class EB:

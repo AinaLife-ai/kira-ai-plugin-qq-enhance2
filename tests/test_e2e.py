@@ -51,7 +51,7 @@ async def plugin_env(monkeypatch, tmp_path):
     context.tool_mgr = None
     context.adapter_mgr = MagicMock()
     context.adapter_mgr.get_adapter = MagicMock(return_value=adapter)
-    context.adapter_mgr.get_all_adapters = MagicMock(return_value=[adapter])
+    context.adapter_mgr.get_adapters = MagicMock(return_value={adapter.info.name: adapter})
     context.plugin_mgr = PluginManager(context)
     context.event_bus = MagicMock()
     context.event_bus.publish = AsyncMock()
