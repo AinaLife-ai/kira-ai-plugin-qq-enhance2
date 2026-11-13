@@ -271,10 +271,10 @@ def test_env_show_time_toggle():
     on = render_env_summary([ev], now=now, show_time=True)
     off = render_env_summary([ev], now=now, show_time=False)
     assert "截至" in on and "用户769690776(周武)" in on, on
-    assert re.search(r"·\s\d{2}:\d{2}\s", on), on
+    assert re.search(r"·\s\d{2}:\d{2}:\d{2}\s", on), on
     assert "用户769690776(周武)" in off, off
     # 关掉时间后不应出现 "· HH:MM "
-    assert not re.search(r"·\s\d{2}:\d{2}\s", off), off
+    assert not re.search(r"·\s\d{2}:\d{2}:\d{2}\s", off), off
 
 
 def test_renderer_never_renders_member_decrease():

@@ -30,12 +30,17 @@ SLOW_TYPES = frozenset({E_CARD, E_ADMIN, E_TITLE, E_RECALL})
 BAN_EXPIRY_GRACE_SECONDS = 3600
 
 
-def fmt_clock(ts: float, now: Optional[float] = None) -> str:
-    """把时间戳格式化成绝对时间（当天 HH:MM / 昨天 HH:MM / MM-DD HH:MM）。
+def fmt_clock(ts: float, now: Optional[float] = None, *,
+              with_seconds: bool = True) -> str:
+    """把时间戳格式化成绝对时间。
+
+    默认精确到秒（当天 HH:MM:SS / 昨天 HH:MM:SS / MM-DD HH:MM:SS）；
+    块头用 `with_seconds=False`，只到分钟。
 
     Args:
         ts: 事件时间戳。
         now: 当前时间（默认 time.time()）。
+        with_seconds: 是否显示秒（事件=True，块头=False）。
 
     Returns:
         格式化后的时间字符串。
@@ -43,15 +48,16 @@ def fmt_clock(ts: float, now: Optional[float] = None) -> str:
     from datetime import datetime
 
     now = time.time() if now is None else now
+    fmt = "%H:%M:%S" if with_seconds else "%H:%M"
     try:
         dt = datetime.fromtimestamp(ts)
         today = datetime.fromtimestamp(now).date()
         delta_days = (today - dt.date()).days
         if delta_days == 0:
-            return dt.strftime("%H:%M")
+            return dt.strftime(fmt)
         if delta_days == 1:
-            return "昨天 " + dt.strftime("%H:%M")
-        return dt.strftime("%m-%d %H:%M")
+            return "昨天 " + dt.strftime(fmt)
+        return dt.strftime(("%m-%d " + fmt) if with_seconds else "%m-%d %H:%M")
     except Exception:
         return ""
 
@@ -59,7 +65,7 @@ def fmt_clock(ts: float, now: Optional[float] = None) -> str:
 def env_header(now: Optional[float] = None) -> str:
     """摘要块头：`[群动态·截至 HH:MM]`。"""
     now = time.time() if now is None else now
-    t = fmt_clock(now, now)
+    t = fmt_clock(now, now, with_seconds=False)
     return f"[群动态·截至 {t}]" if t else "[群动态]"
 
 
@@ -209,8 +215,9 @@ def render_env_summary(
             ))
         if not items:
             return ""
-        # 时间线：新→旧
-        items.sort(key=lambda x: x[0], reverse=True)
+        # 时间线：旧→新（最新事件在最后一行，符合"从上往下读"的聊天习惯）
+        # 排序键是事件原始时间戳（秒），同一秒内保持插入顺序（稳定排序）
+        items.sort(key=lambda x: x[0])
         lines = []
         for ts, text in items:
             if show_time:

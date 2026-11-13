@@ -91,15 +91,15 @@ def test_bug34_time_prefix_calendar():
     t = datetime.combine(today, dtime(10, 30))
     now = t.timestamp()
 
-    assert fmt_clock(t.timestamp(), now) == "10:30"
+    assert fmt_clock(t.timestamp(), now) == "10:30:00"
     assert "截至 10:30" in env_header(now)
 
     y = t - timedelta(days=1)
-    assert fmt_clock(y.timestamp(), now) == "昨天 10:30"
+    assert fmt_clock(y.timestamp(), now) == "昨天 10:30:00"
     print(f"  昨天: {fmt_clock(y.timestamp(), now)}")
 
     d2 = t - timedelta(days=2)
-    assert fmt_clock(d2.timestamp(), now) == d2.strftime("%m-%d %H:%M")
+    assert fmt_clock(d2.timestamp(), now) == d2.strftime("%m-%d %H:%M:%S")
     print(f"  前天: {fmt_clock(d2.timestamp(), now)}")
 
 def test_bug34_crossday():
@@ -110,7 +110,7 @@ def test_bug34_crossday():
     y_2300 = datetime.combine(today - timedelta(days=1), dtime(23, 0))
     got = fmt_clock(y_2300.timestamp(), now_ts)
     print(f"  昨天23:00: {got}")
-    assert got == "昨天 23:00", got
+    assert got == "昨天 23:00:00", got
 
 # ============ Bug 35: 文本缓存长度 ============
 
