@@ -53,6 +53,26 @@ def test_poke_snowluma_private_bot_pokes_user():
     check("SnowLuma 私聊 bot 戳人 → 不记录", ev is None, repr(ev))
 
 
+def test_poke_private_user_pokes_self():
+    """私聊里用户真的戳自己（uin_str1 == uin_str2 == 用户）→ 要记录，并渲染成"戳了戳自己"。
+
+    SnowLuma 私聊：user_id=peer=用户、sender_id=用户、target_id=用户。
+    actor/target 都不是 bot ⇒ 属于"他人事件"，应当入动态。
+    """
+    ev = normalize_notice(
+        _poke(user_id=USER, sender_id=USER, target_id=USER),
+        sid=f"qq:dm:{USER}", self_id=BOT,
+    )
+    check("私聊自戳 → 记录（不丢）", ev is not None, repr(ev))
+    check("私聊自戳 actor=用户", bool(ev) and ev.actor == USER, getattr(ev, "actor", None))
+    check("私聊自戳 target=用户", bool(ev) and ev.target == USER, getattr(ev, "target", None))
+    ev.actor_name, ev.target_name = "周武", "周武"
+    text = render_env_summary([ev], show_time=False, is_group=False)
+    check("私聊块头是「私聊动态」", "私聊动态" in text, text)
+    check("私聊自戳渲染为「戳了戳自己」", "戳了戳自己" in text, text)
+    check("不出现「周武 戳了戳 周武」", "周武 戳了戳 周武" not in text, text)
+
+
 def test_poke_snowluma_private_user_pokes_bot():
     ev = normalize_notice(
         _poke(user_id=USER, sender_id=USER, target_id=BOT),

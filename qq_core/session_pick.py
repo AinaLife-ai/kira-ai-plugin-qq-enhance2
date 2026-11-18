@@ -2,12 +2,16 @@
 
 为什么单独成模块：
     profile_like 的 notice 不带 group_id，框架按 `user_id` 建会话 → `qq:dm:None`。
-    选会话的规则（**先群后私聊**）是纯逻辑，放在 main.py 里不好测，这里单独实现。
+    选会话的规则（**最近活跃，群聊/私聊一起比**）是纯逻辑，放在 main.py 里不好测。
 
 数据结构：
-    store: dict[(adapter_name, uid) → dict[sid → 最后活跃时间]]
-    每个用户记多个会话（群 + 私聊），不是只记最后一条——
-    否则"用户刚私聊完又去群里说话"时，点赞会错误地落到私聊。
+    store: dict[(adapter_name, uid) → dict[sid → {"ts": 最后活跃时间, "spoke": 是否发过言}]]
+    每个用户记多个会话（群 + 私聊），不是只记最后一条——否则"用户刚私聊完又去群里说话"
+    时，点赞会错误地落到私聊。
+
+挑选规则（用户 2026-11-18 明确）：
+    取该用户**最后（最新）活跃**的会话（群聊/私聊一起比较）——
+    "活跃"优先取"发过言"的会话（真实消息），只有从没发过言时才退到"只有通知动作"的会话。
 """
 
 from __future__ import annotations
@@ -29,15 +33,17 @@ def remember_session(
     uid: str,
     sid: str,
     *,
+    spoke: bool = False,
     now: Optional[float] = None,
 ) -> None:
     """记录"某用户最近活跃的会话"。
 
     Args:
-        store: 全局字典 {(adapter_name, uid): {sid: ts}}。
+        store: 全局字典 {(adapter_name, uid): {sid: {"ts": float, "spoke": bool}}}。
         adapter_name: 适配器名。
         uid: 用户 QQ。
         sid: 会话 ID（`adapter:gm:gid` / `adapter:dm:uid`）。
+        spoke: 这次是否是该用户**发的消息**（True）还是仅仅某个通知动作（False）。
         now: 当前时间（测试可注入）。
     """
     uid = str(uid or "")
@@ -47,18 +53,23 @@ def remember_session(
     now = time.time() if now is None else now
     key = (adapter_name, uid)
     sessions = store.setdefault(key, {})
-    sessions[sid] = now
+    prev = sessions.get(sid) or {}
+    sessions[sid] = {
+        "ts": now,
+        # 只要发过一次言，这个会话就算"发过言"（不会因为后来的通知动作被降级）
+        "spoke": bool(prev.get("spoke")) or bool(spoke),
+    }
 
     # 单用户上限：只留最近 N 个会话
     if len(sessions) > MAX_SESSIONS_PER_USER:
-        for old_sid, _ in sorted(sessions.items(), key=lambda kv: kv[1])[:-MAX_SESSIONS_PER_USER]:
+        for old_sid, _ in sorted(sessions.items(), key=lambda kv: kv[1]["ts"])[:-MAX_SESSIONS_PER_USER]:
             sessions.pop(old_sid, None)
 
     # 全局上限：先清 7 天前的，再按"最近活跃"保留 MAX_USERS 个用户（**就地修改**）
     if len(store) > MAX_USERS:
         cutoff = now - LIKE_SESSION_MAX_AGE
         for k in list(store.keys()):
-            fresh = {s: t for s, t in store[k].items() if t >= cutoff}
+            fresh = {s: v for s, v in store[k].items() if v["ts"] >= cutoff}
             if fresh:
                 store[k] = fresh
             else:
@@ -66,7 +77,7 @@ def remember_session(
         if len(store) > MAX_USERS:
             keep = sorted(
                 store.items(),
-                key=lambda kv: max(kv[1].values()) if kv[1] else 0,
+                key=lambda kv: max(v["ts"] for v in kv[1].values()) if kv[1] else 0,
                 reverse=True,
             )[:MAX_USERS]
             keep_keys = {k for k, _ in keep}
@@ -84,13 +95,15 @@ def pick_like_sid(
     now: Optional[float] = None,
     max_age: float = LIKE_SESSION_MAX_AGE,
 ) -> str:
-    """给资料卡点赞挑会话：**先最近的群，再私聊**。
+    """给资料卡点赞挑会话：**该用户最后活跃的那个会话**（群/私聊一起比）。
 
-    语义（用户约定）：点赞是"半公开"的社交动作，优先在群里回应；
-    只有该用户近期没有任何群会话时，才退到私聊。
+    规则：
+      1. 7 天内、该用户**发过言**的会话里取最新；
+      2. 没有发言记录 → 7 天内任何活跃会话（戳过/被贴过表情等）取最新；
+      3. 都没有 → `adapter:dm:uid`。
 
     Args:
-        store: 全局字典 {(adapter_name, uid): {sid: ts}}。
+        store: 全局字典 {(adapter_name, uid): {sid: {"ts": float, "spoke": bool}}}。
         adapter_name: 适配器名。
         operator: 点赞的人 QQ。
         force_dm: True=强制私聊（配置项 profile_like_dm_only）。
@@ -107,16 +120,15 @@ def pick_like_sid(
     now = time.time() if now is None else now
     sessions = store.get((adapter_name, uid)) or {}
     alive = {
-        sid: ts for sid, ts in sessions.items()
-        if ts and now - ts <= max_age and sid and not sid.endswith(":None")
+        sid: info for sid, info in sessions.items()
+        if info and info.get("ts") and now - info["ts"] <= max_age
+        and sid and not sid.endswith(":None")
     }
 
-    groups = {sid: ts for sid, ts in alive.items() if ":gm:" in sid}
-    if groups:
-        return max(groups, key=groups.get)
-
-    dms = {sid: ts for sid, ts in alive.items() if ":dm:" in sid}
-    if dms:
-        return max(dms, key=dms.get)
+    # 优先"发过言"的会话：群聊/私聊同等对待，只比时间
+    spoke = {sid: info for sid, info in alive.items() if info.get("spoke")}
+    pool = spoke or alive
+    if pool:
+        return max(pool, key=lambda s: pool[s]["ts"])
 
     return f"{adapter_name}:dm:{uid}"

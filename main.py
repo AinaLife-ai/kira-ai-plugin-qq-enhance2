@@ -424,11 +424,12 @@ class QQEnhance2Plugin(BasePlugin):
         """
         return self._resolve_adapter(adapter_name)[1]
 
-    def _remember_session(self, adapter_name: str, uid: str, sid: str) -> None:
+    def _remember_session(self, adapter_name: str, uid: str, sid: str,
+                          *, spoke: bool = False) -> None:
         """记录"某用户最近活跃的会话"（供没有 group_id 的事件兜底）。
 
         每个用户保留**多个**会话（群 + 私聊各记各的，最多 8 个），
-        这样 `_resolve_like_sid` 才能按"先群后私聊"挑，而不是只看最后一条消息落在哪。
+        `_resolve_like_sid` 再按"最后活跃的会话"挑（群/私聊一起比）。
         实现见 `qq_core/session_pick.py`（纯逻辑，可单测）。
 
         Args:
@@ -436,7 +437,7 @@ class QQEnhance2Plugin(BasePlugin):
             uid: 用户 QQ。
             sid: 会话 ID（不能是 None 会话）。
         """
-        remember_session(self._recent_sessions, adapter_name, uid, sid)
+        remember_session(self._recent_sessions, adapter_name, uid, sid, spoke=spoke)
 
     def _resolve_like_sid(self, adapter_name: str, raw: dict, operator: str) -> str:
         """给"资料卡被赞"选一个真实存在的会话。
@@ -445,9 +446,9 @@ class QQEnhance2Plugin(BasePlugin):
         而该字段是空的 → `qq:dm:None`。必须自己挑：
 
         1. 协议端给了 group_id（部分实现会带）→ 用那个群；
-        2. 否则用"这个用户最近活跃的**群**会话"（7 天内，取最新）；
-        3. 没有任何群记录 → 用最近的私聊会话；
-        4. 都没有 → 用和他的私聊 `adapter:dm:uid`（至少是个合法会话）。
+        2. 否则用"这个用户**最后活跃**的会话"（7 天内，群聊/私聊一起比，
+           优先取该用户真发过言的会话）；
+        3. 都没有 → 用和他的私聊 `adapter:dm:uid`（至少是个合法会话）。
 
         Args:
             adapter_name: 适配器名。
@@ -588,7 +589,7 @@ class QQEnhance2Plugin(BasePlugin):
                 _an0 = _sid0.split(":", 1)[0] if ":" in _sid0 else ""
                 sender0 = getattr(event.message, "sender", None)
                 uid0 = str(getattr(sender0, "user_id", "") or "")
-                self._remember_session(_an0, uid0, _sid0)
+                self._remember_session(_an0, uid0, _sid0, spoke=True)
             except Exception:
                 pass
             # 顺便缓存群名（普通消息也带 group_name，成本 0）
@@ -699,7 +700,7 @@ class QQEnhance2Plugin(BasePlugin):
         # 唤醒级事件处理
         if qq_event.etype == E_PROFILE_LIKE_SELF:
             # 资料卡点赞：协议端不给 group_id，框架会建出 qq:dm:None 的幽灵会话 →
-            # 这里换成"用户最近活跃的会话"（**先群后私聊**），bot 的回复才有人看得到
+            # 这里换成"用户最后活跃的会话"（群/私聊一起比），bot 的回复才有人看得到
             logger.info(
                 f"[QQ增强2] 收到资料卡点赞: adapter={adapter_name} "
                 f"operator={qq_event.actor or '(空)'} times={qq_event.extra.get('times')} "

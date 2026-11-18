@@ -1,12 +1,8 @@
-"""第十五轮回归测试：资料卡点赞的会话挑选（先群后私聊）。
+"""第十五轮回归测试：资料卡点赞的会话挑选。
 
-用户实机反馈：
-    用户"刚私聊过、也在群里活跃"时，资料卡点赞被通知到了私聊。
-根因：
-    `_recent_sessions[(adapter, uid)]` 只存**最后一条**消息的会话，
-    私聊后接着来点赞 → 命中私聊；群会话被覆盖掉了。
-修复：
-    每个用户记多个会话（群+私聊），`pick_like_sid` 明确 **先最近的群，再私聊**。
+规则（用户 2026-11-18 明确）：
+    取该用户**最后（最新）活跃**的会话（群聊/私聊**一起比较**），
+    优先"发过言"的会话；从没发过言才退到"只有通知动作"的会话；都没有才私聊。
 """
 
 import sys
@@ -32,23 +28,40 @@ DM = f"qq:dm:{UID}"
 
 
 def _store(*items):
-    """items: (sid, 距今多少秒)"""
+    """items: (sid, 距今多少秒) 或 (sid, 距今多少秒, 是否发过言)"""
     store = {}
     now = time.time()
-    for sid, ago in items:
-        remember_session(store, ADAPTER, UID, sid, now=now - ago)
+    for item in items:
+        sid, ago = item[0], item[1]
+        spoke = item[2] if len(item) > 2 else True
+        remember_session(store, ADAPTER, UID, sid, spoke=spoke, now=now - ago)
     return store
 
 
-def test_prefers_group_over_newer_dm():
-    """群 1 小时前说过话、私聊 10 秒前 → 仍选群（本次修复的核心）。"""
+def test_newer_dm_beats_older_group():
+    """私聊 10 秒前发过言、群 1 小时前发过言 → 选**私聊**（最新活跃，群私聊同权）。"""
     store = _store((GM_A, 3600), (DM, 10))
+    assert pick_like_sid(store, ADAPTER, UID) == DM
+
+
+def test_newer_group_beats_older_dm():
+    """反过来：群更新 → 选群。"""
+    store = _store((GM_A, 10), (DM, 3600))
     assert pick_like_sid(store, ADAPTER, UID) == GM_A
 
 
-def test_newest_group_wins():
+def test_spoke_session_beats_merely_active_one():
+    """只有通知动作的会话（没发言）不算"最后活跃"，让位给发过言的会话。"""
+    store = _store((GM_A, 5, False), (DM, 600, True))
+    assert pick_like_sid(store, ADAPTER, UID) == DM
+
+
+def test_newest_session_wins_regardless_of_type():
+    """多个会话时只看时间：私聊 5 秒前 > 群 60 秒前 > 群 1 小时前。"""
     store = _store((GM_A, 3600), (GM_B, 60), (DM, 5))
-    assert pick_like_sid(store, ADAPTER, UID) == GM_B
+    assert pick_like_sid(store, ADAPTER, UID) == DM
+    store2 = _store((GM_A, 3600), (GM_B, 60), (DM, 120))
+    assert pick_like_sid(store2, ADAPTER, UID) == GM_B
 
 
 def test_falls_back_to_dm_without_group():
@@ -101,7 +114,14 @@ def test_global_user_cap_prunes_in_place():
     assert (ADAPTER, f"u{MAX_USERS + 9}") in store
 
 
-def test_old_sessions_do_not_leak_into_group_choice():
-    """7 天前的群不算，但同一用户 2 天前的群要算。"""
-    store = _store((GM_A, 2 * 86400), (DM, 1))
+def test_old_sessions_are_ignored():
+    """7 天前的单聊不算；2 天前的群算。"""
+    store = _store((GM_A, 2 * 86400), (DM, LIKE_SESSION_MAX_AGE + 60))
     assert pick_like_sid(store, ADAPTER, UID) == GM_A
+
+
+def test_spoke_flag_is_sticky():
+    """发过言的会话后来只来了通知 → 仍然是"发过言"的会话，不会被降级。"""
+    store = _store((GM_A, 600, True))
+    remember_session(store, ADAPTER, UID, GM_A, spoke=False)
+    assert store[(ADAPTER, UID)][GM_A]["spoke"] is True
