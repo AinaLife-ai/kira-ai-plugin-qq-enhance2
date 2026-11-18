@@ -125,3 +125,41 @@ def test_spoke_flag_is_sticky():
     store = _store((GM_A, 600, True))
     remember_session(store, ADAPTER, UID, GM_A, spoke=False)
     assert store[(ADAPTER, UID)][GM_A]["spoke"] is True
+
+
+def test_lookup_is_per_user_not_global():
+    """关键隔离：A 和 B 在同一个群，B 最近在群里发言 → 不能把"群活跃"算到 A 头上。
+
+    点赞的是 A，就要找 **A 自己**最后活跃的会话；B 的发言只是 B 的活跃。
+    """
+    store = {}
+    now = time.time()
+    remember_session(store, ADAPTER, "userB", GM_A, spoke=True, now=now)        # B 刚在群里发言
+    remember_session(store, ADAPTER, "userA", DM, spoke=True, now=now - 300)    # A 5 分钟前私聊发言
+    assert pick_like_sid(store, ADAPTER, "userA") == DM
+
+    # 反过来：A 在群里发言、B 在私聊 → A 的点赞要进群
+    store2 = {}
+    remember_session(store2, ADAPTER, "userB", f"qq:dm:userB", spoke=True, now=now)
+    remember_session(store2, ADAPTER, "userA", GM_A, spoke=True, now=now - 300)
+    assert pick_like_sid(store2, ADAPTER, "userA") == GM_A
+
+
+def test_multi_user_multi_group_isolation():
+    """A 在群 111，B 在群 222：A 的点赞只能落在 A 的群。"""
+    store = {}
+    now = time.time()
+    remember_session(store, ADAPTER, "userA", GM_A, spoke=True, now=now - 600)
+    remember_session(store, ADAPTER, "userB", GM_B, spoke=True, now=now)
+    assert pick_like_sid(store, ADAPTER, "userA") == GM_A
+    assert pick_like_sid(store, ADAPTER, "userB") == GM_B
+
+
+def test_different_adapters_do_not_mix():
+    """多适配器（多号）部署：同名 QQ 号在别的 adapter 下的会话不能串用。"""
+    store = {}
+    now = time.time()
+    remember_session(store, "qq2", UID, "qq2:gm:333", spoke=True, now=now)
+    remember_session(store, "qq", UID, DM, spoke=True, now=now - 60)
+    assert pick_like_sid(store, "qq", UID) == DM
+    assert pick_like_sid(store, "qq2", UID) == "qq2:gm:333"
