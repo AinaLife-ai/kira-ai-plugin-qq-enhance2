@@ -179,14 +179,34 @@ def normalize_notice(
     if notice_type == "notify" and sub_type == "poke":
         # 群 poke 或好友 poke
         #
+        # **发起者 ≠ user_id（私聊）**：这是 SnowLuma 的字段语义，不是笔误——
+        #   · SnowLuma `convertFriendPoke`：
+        #       user_id   = peerUin   ← **会话对端**（私聊里永远是好友，不是发起者）
+        #       sender_id = senderUin ← 真正的发起者
+        #       target_id = targetUin ← 真正的被戳者
+        #     （packages/onebot/src/event-converter/to-notice.ts:128-139，
+        #       协议层 packages/protocol/src/msg-push/decoders/event-0x210.ts:decodeFriendPoke）
+        #   · NapCat / LLOneBot 私聊：user_id = 发起者，无 sender_id。
+        # 实机踩坑（2026-11-18 10:20）：bot 主动戳周武 → SnowLuma 报
+        #   user_id=769690776(周武/peer) sender_id=583893217(bot) target_id=769690776
+        # 旧代码只看 user_id ⇒ 记成"周武 戳了戳 周武"，既冤枉用户又污染私聊上下文。
+        # 群 poke 三家都用 user_id=发起者（SnowLuma group_poke: userUin=uin_str1=actor），
+        # 所以只在**非群聊**时才改用 sender_id。
+        is_group_ctx = bool(raw.get("group_id"))
+        actor = user_id
+        if not is_group_ctx:
+            sender = _uid(raw, "sender_id")
+            if sender:
+                actor = sender
+        #
         # **只保留"其他用户 → 其他用户"**：
         #   · 别人戳 bot：框架自己会构造 `[Poke 用户X(昵称)戳了戳你]` 并置
         #     is_mentioned=True（core/adapter/src/qq/im.py:454-475）→ 唤醒由框架负责；
         #     我们再记一条群动态就变成"群里有人戳紫小贱"，是重复且无用的信息。
-        #   · bot 戳别人：bot 自己的动作，无信息量。
+        #   · bot 戳别人 / bot 戳自己：bot 自己的动作，无信息量（私聊踩坑来源同上）。
         if target_id and target_id == self_id:
             return None
-        if user_id and user_id == self_id:
+        if actor and actor == self_id:
             return None
         et = E_POKE
         # 戳一戳的动作文案：三家协议端字段不同
@@ -197,7 +217,7 @@ def normalize_notice(
         extra = {"raw_action": act, "raw_suffix": suf}
         return QQEvent(
             eid=_eid(), etype=et, sid=sid, ts=ts,
-            actor=user_id, target=target_id, extra=extra,
+            actor=actor, target=target_id, extra=extra,
         )
 
     # ---- 贴表情 ----
@@ -276,13 +296,24 @@ def normalize_notice(
         # | 说明：撤回改写只处理 role=user 的历史消息，assistant（bot 自己）不会被标注
         if operator_id and operator_id == self_id:
             return None
+        is_group = notice_type == "group_recall"
+        # 私聊撤回的 user_id 是**会话对端**（SnowLuma decodeFriendRecall 注释明确：
+        # 138/139 两个方向都取 fromUid/toUid 的对端），**不是撤回的人**：
+        #   · 好友撤回自己的消息 → 对端=好友，碰巧等于作者
+        #   · bot 撤回自己的消息 → 对端还是好友 ⇒ 旧代码会报"好友撤回了一条消息"（错）
+        # 所以私聊不把对端当 target，真正作者交给 main.py 用 message_locator 台账判定。
+        if is_group:
+            actor, target, peer = operator_id, user_id, ""
+        else:
+            actor, target, peer = "", "", user_id
         return QQEvent(eid=_eid(), etype=E_RECALL, sid=sid, ts=ts,
-                       actor=operator_id, target=user_id,
+                       actor=actor, target=target,
                        extra={
                            "message_id": _uid(raw, "message_id"),
                            "message_seq": _s(raw.get("message_seq")),
                            "sub_type": sub_type,
-                           "is_group": notice_type == "group_recall",
+                           "is_group": is_group,
+                           "peer": peer,
                        })
 
     # ---- 资料卡点赞 ----

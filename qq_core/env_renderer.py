@@ -62,11 +62,16 @@ def fmt_clock(ts: float, now: Optional[float] = None, *,
         return ""
 
 
-def env_header(now: Optional[float] = None) -> str:
-    """摘要块头：`[群动态·截至 HH:MM]`。"""
+def env_header(now: Optional[float] = None, *, is_group: bool = True) -> str:
+    """摘要块头：群聊 `[群动态·截至 HH:MM]` / 私聊 `[私聊动态·截至 HH:MM]`。
+
+    私聊里只有"用户 ↔ bot"两方，写成"群动态"会误导模型（实机日志确实出现过
+    私聊上下文里挂 `[群动态]`），所以按会话类型分开命名。
+    """
     now = time.time() if now is None else now
+    label = "群动态" if is_group else "私聊动态"
     t = fmt_clock(now, now, with_seconds=False)
-    return f"[群动态·截至 {t}]" if t else "[群动态]"
+    return f"[{label}·截至 {t}]" if t else f"[{label}]"
 
 
 def event_ttl(etype: str, fresh_seconds: float, slow_seconds: float) -> float:
@@ -175,6 +180,7 @@ def render_env_summary(
     show_time: bool = True,
     now: Optional[float] = None,
     expiry_announced: Optional[dict] = None,
+    is_group: bool = True,
 ) -> str:
     """渲染环境摘要（分层预算 + 踢旧淘汰）。
 
@@ -186,6 +192,7 @@ def render_env_summary(
         show_time: 是否给每条事件加绝对时间。
         now: 当前时间戳（默认 time.time()）。
         expiry_announced: 已补报过期的禁言 eid 集合（dict，渲染时会写入）。
+        is_group: True=群聊（块头「群动态」）；False=私聊（块头「私聊动态」）。
 
     Returns:
         渲染后的摘要文本（空则返回空串）。
@@ -194,7 +201,7 @@ def render_env_summary(
         return ""
 
     now = time.time() if now is None else now
-    header = env_header(now)
+    header = env_header(now, is_group=is_group)
 
     def _assemble(evts: list[QQEvent]) -> str:
         by_t: dict[str, list[QQEvent]] = {}
@@ -292,7 +299,11 @@ def _render_type(etype: str, events: list[QQEvent],
             if len(lst) == 1:
                 actor, cnt = lst[0]
                 act = pair_action.get((actor, target), "") or "戳了戳"
-                part = f"{_fmt_user(actor, actor_names.get(actor, ''))} {act} {_fmt_user(target, tname)}"
+                if actor and target and actor == target:
+                    # 真的自己戳自己（群里可以；私聊的误判已在 normalizer 里修掉）
+                    part = f"{_fmt_user(actor, actor_names.get(actor, ''))} {act}自己"
+                else:
+                    part = f"{_fmt_user(actor, actor_names.get(actor, ''))} {act} {_fmt_user(target, tname)}"
                 if cnt > 1:
                     part += f"×{cnt}"
             else:
@@ -413,16 +424,16 @@ def _render_type(etype: str, events: list[QQEvent],
 
         for key, lst in by_actor.items():
             ev0 = lst[0]
-            who = _fmt_user(ev0.actor or ev0.target, ev0.actor_name or ev0.target_name)
+            has_who = bool(ev0.actor or ev0.target)
+            who = _fmt_user(ev0.actor or ev0.target, ev0.actor_name or ev0.target_name) if has_who else ""
             if ev0.actor and ev0.target and ev0.actor != ev0.target:
                 detail = "撤回了他人消息"
             else:
                 detail = "撤回了一条消息"
             ts = max(e.ts for e in lst)
-            if len(lst) > 1:
-                out.append((ts, f"{who} {detail}×{len(lst)}"))
-            else:
-                out.append((ts, f"{who} {detail}"))
+            n = f"×{len(lst)}" if len(lst) > 1 else ""
+            # 私聊撤回拿不到可靠的操作者（SnowLuma 只给会话对端）→ 不点名，别冤枉人
+            out.append((ts, f"{who} {detail}{n}".strip()))
         return out
 
     elif etype == E_TITLE:

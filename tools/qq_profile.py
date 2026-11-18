@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections import OrderedDict
 
 from core.logging_manager import get_logger
@@ -27,7 +26,11 @@ logger = get_logger("qq_enhance2.qq_profile", "cyan")
 # 每次 VLM 调用都是钱 + 几秒延迟；默认 60 秒足够挡住"连续查同一个人"的重复调用，
 # 又不会让刚换的头像在描述里停留太久。
 # 只缓存成功结果（失败可能是网络抖动，不该被记住）。
-_AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+# 兼容旧引用/测试：**真正的缓存**在 qq_core/avatar_view.py（与群头像共用一套）。
+try:
+    from qq_core.avatar_view import _L1 as _AVATAR_DESC_CACHE
+except ImportError:  # 极端情况下退化为独立字典（只影响测试里的 clear()）
+    _AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _AVATAR_DESC_TTL = 60.0
 _AVATAR_DESC_MAX = 128
 
@@ -563,10 +566,11 @@ class QQProfileTool(BaseTool):
     async def _describe_avatar(self, head_url: str) -> str:
         """下载头像并用 VLM 生成描述（真正"看"头像）。
 
-        提示词对齐框架 message_formatter.py 的处理方式：
-        - 默认（avatar_desc_prompt 为空）→ prompt=None → desc_img 内部使用框架
-          默认提示词（跟随 WebUI 中 image_recognition.desc_prompt 的设置）
-        - 用户在本插件 schema 里填了 avatar_desc_prompt → 使用该自定义提示词
+        实现搬到 `qq_core/avatar_view.py`（与群头像共用同一套缓存）：
+        - L1：URL + `avatar_desc_cache_seconds` TTL（进程内，命中连下载都省）
+        - L2：框架 `ctx.image_desc_cache`（按图片内容 md5 落库，换头像自动失效、
+          重启后仍命中，跟随框架自己的清理策略）
+        提示词留空 → 跟随框架 WebUI 的图片识别提示词。
 
         Args:
             head_url: 头像 URL。
@@ -574,53 +578,26 @@ class QQProfileTool(BaseTool):
         Returns:
             头像描述文本；失败时返回空串。
         """
-        # 缓存命中直接返回（省一次 VLM 调用）；ttl<=0 = 关闭缓存
-        ttl = self.avatar_desc_cache_seconds
-        if ttl > 0:
-            cached = _AVATAR_DESC_CACHE.get(head_url)
-            if cached and time.time() - cached[1] < ttl:
-                _AVATAR_DESC_CACHE.move_to_end(head_url)
-                return cached[0]
-
         try:
-            from core.utils.common_utils import desc_img
-
-            img = Image(head_url)
-            vlm = None
-            try:
-                vlm = self.ctx.provider_mgr.get_default_vlm()
-            except Exception:
-                vlm = None
-            if vlm is None:
-                return ""
-
-            # 提示词对齐框架：留空则跟随框架 WebUI 设置（prompt=None → 框架默认提示词）
-            custom_prompt = (self.avatar_desc_prompt or "").strip() or None
-            lang = self._get_locale_lang()
-
-            # 加超时：VLM 可能很慢（框架对普通工具无超时保护），
-            # 超时则降级为只显示 URL，避免卡住整个工具链。
-            try:
-                desc = await asyncio.wait_for(
-                    desc_img(client=vlm, image=img, prompt=custom_prompt, lang=lang),
-                    timeout=self.avatar_desc_timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.debug(f"[QQ增强2] 头像描述超时（>{self.avatar_desc_timeout}s）: {head_url}")
-                return ""
-            # 限制描述长度（避免 VLM 长篇大论刷爆工具输出）
-            desc = (desc or "").strip()
-            if len(desc) > 300:
-                desc = desc[:300] + "…"
-            if desc and ttl > 0:
-                _AVATAR_DESC_CACHE[head_url] = (desc, time.time())
-                _AVATAR_DESC_CACHE.move_to_end(head_url)
-                while len(_AVATAR_DESC_CACHE) > _AVATAR_DESC_MAX:
-                    _AVATAR_DESC_CACHE.popitem(last=False)
-            return desc
-        except Exception as e:
-            logger.debug(f"[QQ增强2] 头像描述失败: {head_url}: {e}")
+            from qq_core.avatar_view import describe_avatar
+        except ImportError:
             return ""
+
+        vlm = None
+        try:
+            vlm = self.ctx.provider_mgr.get_default_vlm()
+        except Exception:
+            vlm = None
+
+        return await describe_avatar(
+            head_url,
+            vlm=vlm,
+            ctx=self.ctx,
+            prompt=self.avatar_desc_prompt,
+            timeout=self.avatar_desc_timeout,
+            ttl=self.avatar_desc_cache_seconds,
+            lang=self._get_locale_lang(),
+        )
 
     async def _fetch_avatar_url(self, qq: str) -> str:
         """兜底获取头像 URL（get_qq_avatar 仅 LLOneBot 支持）。

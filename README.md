@@ -175,6 +175,76 @@
 ## 更新日志
 
 <details>
+<summary><b>v1.1.7</b>（2026-11-18）— 私聊戳一戳归属 / 私聊撤回 / 群头像 / 头像缓存接框架</summary>
+
+### 🐞 修复：私聊里 bot 戳人 → 被记成"用户戳自己"（实机 10:20）
+SnowLuma 的私聊 poke notice 字段语义和 NapCat 不同：
+
+| 字段 | SnowLuma 私聊 | NapCat 私聊 | 群聊（三家一致） |
+|---|---|---|---|
+| `user_id` | **会话对端**（永远是好友） | 发起者 | 发起者 |
+| `sender_id` | **真正的发起者** | 无 | 无 |
+| `target_id` | 被戳者 | 被戳者 | 被戳者 |
+
+旧代码只看 `user_id` ⇒ bot 主动戳周武时记成"周武 戳了戳 周武"，还进了私聊动态。
+现在私聊优先取 `sender_id`，`actor == self_id` 一律丢弃；群聊仍用 `user_id`（三家语义一致）。
+
+### 🐞 修复：私聊撤回张冠李戴
+`friend_recall` 的 `user_id` 同样是**会话对端**（SnowLuma 协议层注释明确：138/139 两个方向都取对端）：
+bot 撤回自己的消息时会被写成"好友撤回了一条消息"。现在：
+- 私聊不再把对端当作者（拿不到可靠操作者就**不点名**）
+- 用插件自己的 message_locator 台账判定：撤回的是 bot 自己的消息 → 直接丢弃，不进动态
+
+### ✨ 新增：看群头像 `qq_group_profile(look_group_avatar=true)`
+```
+群 999888777 的资料：
+  群名：测试群
+  人数：42/200
+  群头像：https://p.qlogo.cn/gh/999888777/999888777/640
+  群头像内容：一只蓝色的猫头
+```
+- 协议端给 `avatar_url`（LLOneBot）就优先用；NapCat/SnowLuma 不返回头像 → 按群号拼腾讯 CDN
+- 与 `qq_profile` 的看头像共用同一套提示词/超时/开关（`avatar_describe` / `avatar_desc_prompt` / `avatar_desc_timeout`）
+
+### ⚡ 头像描述缓存接入框架 `ImageDescCache`
+两级缓存（`avatar_desc_cache_seconds`，0=全关）：
+1. **L1 进程内**：URL + TTL，命中连图片都不用下载
+2. **L2 框架 DB**：`ctx.image_desc_cache` 按**图片内容 MD5** 落库 —— 换头像自动失效、重启后仍命中、跟随框架 15/30 天清理，和框架识别聊天图片共用同一张表
+
+### 🎯 修复：资料卡点赞发到"该用户最后活跃的会话"
+旧逻辑每个用户只记**最后一个**会话（覆盖式），群/私聊互相顶掉；现在每个用户记多个会话
+（群+私聊，最多 8 个），挑选顺序：
+
+1. 协议端给了 `group_id` → 那个群
+2. 7 天内该用户**发过言**的会话里取**最新**（群聊/私聊**一起比较**）
+3. 没有发言记录 → 7 天内任何活跃会话（戳过/被贴过表情）取最新
+4. 都没有 → `adapter:dm:uid`
+
+`profile_like_dm_only=true` 仍可强制私聊。
+所谓"活跃"优先看**真实发言**：只在群里被戳了一下、但今天没说话，不算"最近活跃"。
+
+### 📌 已知边界：框架的"空 notice 消息"
+poke 事件若 `target != self`（例如 bot 自己戳人），框架仍会 publish 一条 **chain 为空**的消息事件：
+```
+[message] [qq | None] [周武]:
+```
+- **不会进 LLM**：`core/workflow/src/im/stages/receive.py` 的 `RouteStage` 对 `chain.is_empty()` 直接 `return False`
+- **本插件不会误判**：`normalize_notice` 对 `actor == self_id` 直接丢弃（v1.1.7 修复）
+- ⚠️ **S/Z 聊天插件会看到它**：它们的 `_detect_kind` 把所有 poke notice 当"真实互动"，
+  且发起者取 `message.sender.user_id`（私聊里是**会话对端**）⇒ bot 自己戳人会被它们记成"用户戳了一下"，
+  影响存在感/骚扰计数（不影响回复流程）。属于框架 notice 构造（`sender=user_id`）的连带问题，
+  建议上游按 `sender_id` 修正。
+
+### 🏷 私聊不再叫"群动态"
+私聊上下文里块头改为 `[私聊动态·截至 HH:MM]`，群聊仍是 `[群动态·截至 HH:MM]`。
+
+### ✅ 验证
+pytest **146**（新增 17 项 poke/撤回/缓存 + 5 项群头像/块头）；
+KiraAI **v3.2.0** 与 **v3.1.2** 双版本：self_scope 46 / config_matrix 25 / 深度审计 30 / 场景 27 / 安全 35 / 边界 23 / 容错 34 / 发布审计 14 / 前后端 10 / 头像 52 / compat_320 41。
+
+</details>
+
+<details>
 <summary><b>v1.1.6</b>（2026-11-14）— 群动态改为"最新在最后"</summary>
 
 ### 🔄 排序方向 + 事件时间精确到秒
