@@ -111,7 +111,7 @@ check("包含群动态时间前缀", "群动态" in summary)
 check("戳一戳按 target 合并（只出现一次'戳了戳'）",
       summary.count("戳了戳") == 1, f"出现 {summary.count('戳了戳')} 次")
 check("戳一戳含两人（张三和王五）", "张三" in summary and "王五" in summary)
-check("禁言显示已解除", "(已解除)" in summary, summary)
+check("禁言显示已解除", "（已解除）" in summary, summary)
 check("禁言不重复显示独立'解除禁言'条目",
       "解除禁言" not in summary, summary)
 check("退群不进摘要（改走 notice 唤醒）",

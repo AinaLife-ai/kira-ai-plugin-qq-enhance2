@@ -112,9 +112,17 @@ check("提示协议端可能不支持", "可能不支持" in gsrc)
 
 
 print("\n=== 4. 头像查询：VLM 读图 ===")
-check("调用 desc_img（框架 VLM）", "from core.utils.common_utils import desc_img" in src)
+av_src = Path(__file__).parent.parent.joinpath("qq_core", "avatar_view.py").read_text(encoding="utf-8")
+vlm_src = src + "\n" + av_src
+check("调用 desc_img（框架 VLM）", "from core.utils.common_utils import desc_img" in vlm_src)
 check("提示词留空时跟随框架设置",
-      'custom_prompt = (self.avatar_desc_prompt or "").strip() or None' in src)
+      'custom_prompt = (prompt or "").strip() or None' in vlm_src
+      or 'custom_prompt = (self.avatar_desc_prompt or "").strip() or None' in vlm_src)
+# v1.1.7：L1(URL+TTL) + L2(框架 ImageDescCache 按内容 md5) 两级缓存
+check("使用框架 ImageDescCache", "image_desc_cache" in av_src)
+check("按图片内容 md5 命中 L2", "_md5_of_file" in av_src and "fw_cache.get(md5)" in av_src)
+check("ttl=0 时不读不写缓存", "if ttl > 0 and fw_cache" in av_src or "if ttl > 0:" in av_src)
+check("群资料工具复用同一套头像缓存", "avatar_view" in gsrc)
 check("VLM 不可用时降级显示 URL", "if avatar_desc:" in src)
 check("lang 跟随框架 locale", "_get_locale_lang" in src)
 

@@ -29,6 +29,7 @@ from .qq_core.env_renderer import (render_env_summary, filter_env_events,
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
 from .qq_core.recall_rewriter import RecallRewriter
+from .qq_core.session_pick import pick_like_sid, remember_session
 from .qq_core.emoji_rewriter import EmojiRewriter
 from .qq_core.name_resolver import NameResolver
 from .tools.qq_profile import QQProfileTool
@@ -119,10 +120,11 @@ class QQEnhance2Plugin(BasePlugin):
         self._last_env_inject: dict[str, float] = {}  # sid → 上次注入时间
         # 已"补报到期"的禁言事件（eid → 首次补报时间）：只补一次，之后不再渲染
         self._ban_expiry_announced: dict[str, float] = {}
-        # 用户最近活跃的会话：(adapter_name, uid) → (sid, ts)
-        # 用于 profile_like 这种"没有 group_id 的 notice"：协议端不告诉我们是哪个群/私聊点的赞，
-        # 只能往"最近和这个用户有交集的会话"发，避免落到 qq:dm:None 这种幽灵会话。
-        self._recent_sessions: dict[tuple[str, str], tuple[str, float]] = {}
+        # 用户最近活跃的会话：(adapter_name, uid) → {sid: 最后活跃时间}
+        # 用于 profile_like 这种"没有 group_id 的 notice"：协议端不告诉我们是哪个群/私聊点的赞。
+        # **每个用户记多个会话**（群 + 私聊），结算时优先群聊：点赞是"半公开"的社交动作，
+        # 在群里回一句比私聊更自然；只有该用户近期没有任何群会话时才退到私聊。
+        self._recent_sessions: dict[tuple[str, str], dict[str, float]] = {}
 
     async def initialize(self):
         """初始化运行时组件。
@@ -425,25 +427,16 @@ class QQEnhance2Plugin(BasePlugin):
     def _remember_session(self, adapter_name: str, uid: str, sid: str) -> None:
         """记录"某用户最近活跃的会话"（供没有 group_id 的事件兜底）。
 
+        每个用户保留**多个**会话（群 + 私聊各记各的，最多 8 个），
+        这样 `_resolve_like_sid` 才能按"先群后私聊"挑，而不是只看最后一条消息落在哪。
+        实现见 `qq_core/session_pick.py`（纯逻辑，可单测）。
+
         Args:
             adapter_name: 适配器名。
             uid: 用户 QQ。
             sid: 会话 ID（不能是 None 会话）。
         """
-        uid = str(uid or "")
-        sid = str(sid or "")
-        if not uid or uid == "None" or not sid or sid.endswith(":None"):
-            return
-        self._recent_sessions[(adapter_name, uid)] = (sid, time.time())
-        if len(self._recent_sessions) > 2000:
-            cutoff = time.time() - 7 * 86400
-            self._recent_sessions = {
-                k: v for k, v in self._recent_sessions.items() if v[1] >= cutoff
-            }
-            if len(self._recent_sessions) > 2000:
-                items = sorted(self._recent_sessions.items(),
-                               key=lambda kv: kv[1][1], reverse=True)[:2000]
-                self._recent_sessions = dict(items)
+        remember_session(self._recent_sessions, adapter_name, uid, sid)
 
     def _resolve_like_sid(self, adapter_name: str, raw: dict, operator: str) -> str:
         """给"资料卡被赞"选一个真实存在的会话。
@@ -452,8 +445,9 @@ class QQEnhance2Plugin(BasePlugin):
         而该字段是空的 → `qq:dm:None`。必须自己挑：
 
         1. 协议端给了 group_id（部分实现会带）→ 用那个群；
-        2. 否则用"这个用户最近活跃的会话"（群或私聊都行）；
-        3. 都没有 → 用和他的私聊 `adapter:dm:uid`（至少是个合法会话）。
+        2. 否则用"这个用户最近活跃的**群**会话"（7 天内，取最新）；
+        3. 没有任何群记录 → 用最近的私聊会话；
+        4. 都没有 → 用和他的私聊 `adapter:dm:uid`（至少是个合法会话）。
 
         Args:
             adapter_name: 适配器名。
@@ -466,12 +460,12 @@ class QQEnhance2Plugin(BasePlugin):
         gid = str((raw or {}).get("group_id") or "")
         if gid and gid != "None":
             return f"{adapter_name}:gm:{gid}"
-        # 默认落到"最近互动会话"（群/私聊按时间比）；开关打开才强制私聊
-        if not self.profile_like_dm_only:
-            hit = self._recent_sessions.get((adapter_name, str(operator or "")))
-            if hit and time.time() - hit[1] <= 7 * 86400:
-                return hit[0]
-        return f"{adapter_name}:dm:{operator}"
+        return pick_like_sid(
+            self._recent_sessions,
+            adapter_name,
+            operator,
+            force_dm=self.profile_like_dm_only,
+        )
 
     def _message_in_buffer(self, sid: str, message_id: str) -> bool:
         """判断某条消息是否还在会话缓冲区里（= 会和本次唤醒同一批送给 LLM）。
@@ -705,7 +699,7 @@ class QQEnhance2Plugin(BasePlugin):
         # 唤醒级事件处理
         if qq_event.etype == E_PROFILE_LIKE_SELF:
             # 资料卡点赞：协议端不给 group_id，框架会建出 qq:dm:None 的幽灵会话 →
-            # 这里换成"用户最近活跃的会话"（群或私聊），bot 的回复才有人看得到
+            # 这里换成"用户最近活跃的会话"（**先群后私聊**），bot 的回复才有人看得到
             logger.info(
                 f"[QQ增强2] 收到资料卡点赞: adapter={adapter_name} "
                 f"operator={qq_event.actor or '(空)'} times={qq_event.extra.get('times')} "
@@ -786,6 +780,20 @@ class QQEnhance2Plugin(BasePlugin):
             msg_id = qq_event.extra.get("message_id", "")
             if msg_id:
                 info = await self.locator.lookup(msg_id, qq_event.sid)
+                # 私聊撤回：notice 里的 user_id 是会话对端，不是操作者。
+                # 只有台账能告诉我们"被撤回的是谁的消息"：
+                #   · is_self=True → bot 自己撤回的 → 自己动作，不进群动态
+                #   · 否则 → 把作者补成 target，摘要才不会张冠李戴
+                if not qq_event.extra.get("is_group") and info:
+                    if info.get("is_self"):
+                        if self.debug_log:
+                            logger.info(
+                                f"[QQ增强2] 跳过 bot 自己的撤回: {qq_event.sid} "
+                                f"message_id={msg_id}"
+                            )
+                        return
+                    qq_event.target = str(info.get("sender") or "")
+                    qq_event.target_name = str(info.get("sender_name") or "")
                 if info:
                     await self.locator.archive_recall(
                         sid=qq_event.sid,
@@ -879,6 +887,8 @@ class QQEnhance2Plugin(BasePlugin):
                 show_time=self.env_show_time,
                 now=now_ts,
                 expiry_announced=self._ban_expiry_announced,
+                # 私聊不写"群动态"：会话里只有用户和 bot 两方
+                is_group=(":gm:" in sid),
             )
             if env_text:
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
@@ -888,7 +898,7 @@ class QQEnhance2Plugin(BasePlugin):
                 # 所以环境块默认不出现在 cmd 日志里。debug_log 开启时单独打一条，
                 # 方便确认功能是否生效。
                 if self.debug_log:
-                    logger.info(f"[QQ增强2] 注入群动态 {sid}: {env_text}")
+                    logger.info(f"[QQ增强2] 注入动态 {sid}: {env_text}")
 
         # 撤回改写（每轮执行，不受节流影响）
         await self.recall_rewriter.rewrite(
@@ -931,4 +941,8 @@ class QQEnhance2Plugin(BasePlugin):
                                            avatar_desc_timeout=self.avatar_desc_timeout,
                                            avatar_describe=self.avatar_describe,
                                            avatar_desc_cache_seconds=self.avatar_desc_cache_seconds))
-            req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id))
+            req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
+                                                avatar_desc_prompt=self.avatar_desc_prompt,
+                                                avatar_desc_timeout=self.avatar_desc_timeout,
+                                                avatar_describe=self.avatar_describe,
+                                                avatar_desc_cache_seconds=self.avatar_desc_cache_seconds))

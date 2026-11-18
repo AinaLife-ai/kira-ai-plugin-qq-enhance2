@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from core.logging_manager import get_logger
 from core.chat.message_utils import KiraMessageBatchEvent
 from core.utils.tool_utils import BaseTool
@@ -18,13 +20,17 @@ logger = get_logger("qq_enhance2.qq_group_profile", "cyan")
 
 
 class QQGroupProfileTool(BaseTool):
-    """QQ 群成员资料工具（群名片/头衔，读+写合体）。"""
+    """QQ 群资料工具（群资料/群头像 + 群成员名片/头衔，读+写合体）。"""
 
     name = "qq_group_profile"
-    description = "查询/修改群成员资料。不传 user_id=自己在本群的群名片/头衔（可改）；传=查他人（只读）。改群头像用 group_portrait（需管理员）。"
+    description = "查询/修改群资料。look_group_avatar=true=看本群（群名/人数/群头像内容）；不传 user_id=自己在本群的群名片/头衔（可改）；传=查他人（只读）。改群头像用 group_portrait（需管理员）。"
     parameters = {
         "type": "object",
         "properties": {
+            "look_group_avatar": {
+                "type": "boolean",
+                "description": "查看本群资料+群头像内容（群名/人数/头像描述）。true 时忽略 user_id",
+            },
             "user_id": {
                 "type": "string",
                 "description": "目标QQ。不传=自己；传=查他人（只读）",
@@ -48,10 +54,21 @@ class QQGroupProfileTool(BaseTool):
         },
     }
 
-    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = ""):
+    def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
+                 avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0,
+                 avatar_describe: bool = True,
+                 avatar_desc_cache_seconds: float = 60.0):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
+        # 头像识别配置与 qq_profile 共用同一组 schema 项（同一套提示词/缓存/开关）
+        self.avatar_desc_prompt = avatar_desc_prompt or ""
+        self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
+        self.avatar_describe = bool(avatar_describe)
+        try:
+            self.avatar_desc_cache_seconds = float(avatar_desc_cache_seconds)
+        except (TypeError, ValueError):
+            self.avatar_desc_cache_seconds = 60.0
 
     @staticmethod
     def _prepare_file(value) -> tuple[str, str]:
@@ -116,6 +133,7 @@ class QQGroupProfileTool(BaseTool):
         title: str = None,
         title_duration: int = -1,
         group_portrait: str = "",
+        look_group_avatar: bool = False,
         **kwargs,
     ) -> str:
         """执行工具。
@@ -127,6 +145,7 @@ class QQGroupProfileTool(BaseTool):
             title: 新头衔。None=不修改；空字符串=清除头衔。
             title_duration: 头衔有效天数（-1=永久，OB11 单位为天）。
             group_portrait: 新群头像（路径/URL/base64）。空=不修改。
+            look_group_avatar: True=查看群资料+群头像（忽略 user_id）。
 
         Returns:
             操作结果文本。
@@ -139,6 +158,11 @@ class QQGroupProfileTool(BaseTool):
             return "错误：此工具仅在群聊中可用。"
 
         group_id = event.session.session_id
+
+        # 只读：看本群（群名/人数/群头像）——与"看成员"分开，避免和 user_id 语义打架
+        if look_group_avatar:
+            return await self._query_group(group_id)
+
         cur_self_id = self._resolve_self_id(event)
         target = str(user_id) if user_id else cur_self_id
         if not target:
@@ -213,6 +237,117 @@ class QQGroupProfileTool(BaseTool):
         except Exception as e:
             logger.debug(f"[QQ增强2] set_group_card/title 失败: {e}")
             return f"修改失败：{e}"
+
+    async def _query_group(self, group_id: str) -> str:
+        """查看本群资料（群名/人数/群头像内容）。
+
+        **为什么头像 URL 自己拼**：三家协议端不一致——
+          · LLOneBot `get_group_info` 返回 `avatar_url`
+          · NapCat / SnowLuma 只返回群名/人数，**不带头像**
+        腾讯群头像 CDN 是公开的：`https://p.qlogo.cn/gh/{群号}/{群号}/640`
+        （与 qq_profile 用 `q1.qlogo.cn/g?b=qq&nk={QQ}` 是同一套路），
+        所以协议端给 URL 就优先用，不给就自己拼。
+
+        Args:
+            group_id: 群号。
+
+        Returns:
+            资料文本。
+        """
+        data: dict = {}
+        try:
+            resp = await asyncio.wait_for(
+                self.adapter.bot.send_action(
+                    "get_group_info", {"group_id": group_id, "no_cache": False},
+                ),
+                timeout=5.0,
+            )
+            if isinstance(resp, dict):
+                data = resp.get("data") or {}
+        except Exception as e:
+            logger.debug(f"[QQ增强2] get_group_info 失败: {group_id}: {e}")
+
+        name = str(data.get("group_name") or "")
+        remark = str(data.get("group_remark") or "")
+        try:
+            member_count = int(data.get("member_count") or 0)
+        except (TypeError, ValueError):
+            member_count = 0
+        try:
+            max_count = int(data.get("max_member_count") or 0)
+        except (TypeError, ValueError):
+            max_count = 0
+
+        avatar_url = str(data.get("avatar_url") or data.get("avatar") or "")
+        if not avatar_url and str(group_id).isdigit():
+            avatar_url = f"https://p.qlogo.cn/gh/{group_id}/{group_id}/640"
+
+        lines = [f"群 {group_id} 的资料："]
+        lines.append(f"  群名：{name or '（协议端未提供）'}")
+        if remark and remark != name:
+            lines.append(f"  群备注：{remark}")
+        if member_count:
+            lines.append(
+                f"  人数：{member_count}" + (f"/{max_count}" if max_count else "")
+            )
+        if data.get("group_all_shut") in (-1, True):
+            lines.append("  全员禁言：开启")
+        if avatar_url:
+            lines.append(f"  群头像：{avatar_url}")
+            if self.avatar_describe:
+                desc = await self._describe_avatar(avatar_url)
+                lines.append(f"  群头像内容：{desc}" if desc else "  群头像内容：（识别失败，仅提供链接）")
+            else:
+                lines.append("  群头像内容：（识别已关闭，仅提供链接）")
+        return "\n".join(lines)
+
+    async def _describe_avatar(self, head_url: str) -> str:
+        """看群头像（复用 qq_profile 的同一套缓存/提示词/超时配置）。
+
+        Args:
+            head_url: 群头像 URL。
+
+        Returns:
+            描述文本；失败返回空串。
+        """
+        try:
+            from qq_core.avatar_view import describe_avatar
+        except ImportError:
+            return ""
+
+        vlm = None
+        try:
+            vlm = self.ctx.provider_mgr.get_default_vlm()
+        except Exception:
+            vlm = None
+
+        return await describe_avatar(
+            head_url,
+            vlm=vlm,
+            ctx=self.ctx,
+            prompt=self.avatar_desc_prompt,
+            timeout=self.avatar_desc_timeout,
+            ttl=self.avatar_desc_cache_seconds,
+            lang=self._get_locale_lang(),
+        )
+
+    def _get_locale_lang(self) -> str:
+        """获取框架语言设置（config 可能是 dict 或 KiraConfig 对象）。"""
+        cfg = getattr(self.ctx, "config", None)
+        if cfg is None:
+            return "zh"
+        getter = getattr(cfg, "get_config", None)
+        if callable(getter):
+            try:
+                return getter("locale.lang", "zh") or "zh"
+            except Exception:
+                pass
+        if isinstance(cfg, dict):
+            val = cfg.get("locale", {})
+            if isinstance(val, dict):
+                return val.get("lang") or "zh"
+            return cfg.get("locale.lang") or "zh"
+        return "zh"
 
     async def _query_member(self, group_id: str, qq: str) -> str:
         """查询群成员资料。
