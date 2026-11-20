@@ -181,6 +181,7 @@ def render_env_summary(
     now: Optional[float] = None,
     expiry_announced: Optional[dict] = None,
     is_group: bool = True,
+    show_self_unban: bool = True,
 ) -> str:
     """渲染环境摘要（分层预算 + 踢旧淘汰）。
 
@@ -193,6 +194,8 @@ def render_env_summary(
         now: 当前时间戳（默认 time.time()）。
         expiry_announced: 已补报过期的禁言 eid 集合（dict，渲染时会写入）。
         is_group: True=群聊（块头「群动态」）；False=私聊（块头「私聊动态」）。
+        show_self_unban: 自己的解禁操作是否**单独成行**（独立开关）；
+            即使 False，该事件仍参与禁言条目的"（已解除）"配对。
 
     Returns:
         渲染后的摘要文本（空则返回空串）。
@@ -219,6 +222,7 @@ def render_env_summary(
                 et, subset, all_events=evts,
                 poke_action_text=poke_action_text,
                 now=now, expiry_announced=expiry_announced,
+                show_self_unban=show_self_unban,
             ))
         if not items:
             return ""
@@ -249,7 +253,8 @@ def _render_type(etype: str, events: list[QQEvent],
                  all_events: list[QQEvent] | None = None,
                  poke_action_text: bool = False,
                  now: Optional[float] = None,
-                 expiry_announced: Optional[dict] = None) -> list[tuple[int, str]]:
+                 expiry_announced: Optional[dict] = None,
+                 show_self_unban: bool = True) -> list[tuple[int, str]]:
     """渲染单个类型的事件，返回 [(时间戳, 文本)]。
 
     Args:
@@ -257,6 +262,7 @@ def _render_type(etype: str, events: list[QQEvent],
         events: 该类型的事件（已排序、已截断到 max_per_type）。
         all_events: 全量事件（用于跨类型配对，如 ban ↔ unban）。
         poke_action_text: 是否用真实动作文案。
+        show_self_unban: 自己的解禁操作是否单独成行（不影响配对）。
         now: 当前时间戳。
         expiry_announced: 禁言"已补报到期"集合。
     """
@@ -373,7 +379,10 @@ def _render_type(etype: str, events: list[QQEvent],
 
         for ev in events:
             duration = _ban_duration(ev)
-            if ev.actor:
+            if ev.extra.get("self_action"):
+                # 自己的操作（collect_self_ban）：直接第二人称，避免"你 被 你 禁言"的歧义
+                part = f"你禁言了 {_fmt_user(ev.target, ev.target_name)}"
+            elif ev.actor:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 禁言"
             else:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被禁言"
@@ -408,7 +417,12 @@ def _render_type(etype: str, events: list[QQEvent],
         for ev in events:
             if ev.target in ban_targets:
                 continue
-            if ev.actor:
+            if ev.extra.get("self_action"):
+                # 独立开关：只配对、不单独成行
+                if not show_self_unban:
+                    continue
+                part = f"你解除了 {_fmt_user(ev.target, ev.target_name)} 的禁言"
+            elif ev.actor:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被 {_fmt_user(ev.actor, ev.actor_name)} 解除禁言"
             else:
                 part = f"{_fmt_user(ev.target, ev.target_name)} 被解除禁言"
