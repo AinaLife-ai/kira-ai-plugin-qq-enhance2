@@ -145,6 +145,8 @@ def normalize_notice(
     group_id: str = "",
     now: Optional[int] = None,
     name_resolver=None,
+    collect_self_ban: bool = False,
+    collect_self_unban: bool = False,
 ) -> Optional[QQEvent]:
     """把一条 OneBot notice 原始事件归一化为 QQEvent。
 
@@ -154,6 +156,8 @@ def normalize_notice(
         self_id: 机器人自己的 QQ 号（用于判定"与自己有关"）。
         group_id: 群号（群聊事件必填）。
         now: 当前时间戳（默认 time.time()）。
+        collect_self_ban: 是否记录 **bot 自己的禁言操作**（配置项，默认关）。
+        collect_self_unban: 是否记录 **bot 自己的解禁操作**（配置项，默认关）。
         name_resolver: 可选 async 回调 (qq, group_id) -> name，用于补昵称。
 
     Returns:
@@ -267,9 +271,19 @@ def normalize_notice(
         # 自己被禁言/解禁 → 归 QQ增强1 处理，我们不重复
         if user_id and user_id == self_id:
             return None
-        # bot 自己禁言/解禁别人 → 自己的动作，不进群动态
+        # bot 自己禁言/解禁别人 → 默认是自己的动作，不进动态；
+        # 开启 collect_self_ban 后用 self_action 标记放行（供"自动禁言系统"复盘）。
         if operator_id and operator_id == self_id:
-            return None
+            # 禁言/解禁是**两个独立开关**：
+            #   · 禁言关闭、解禁开启时，仍要把解禁事件收进来——
+            #     它要用来给上面的禁言条目配对显示"（已解除）"，否则会显示成"还在禁言中"。
+            #     是否单独成行由渲染层 show_self_unban 决定。
+            want = collect_self_ban if et == E_BAN else (collect_self_ban or collect_self_unban)
+            if not want:
+                return None
+            return QQEvent(eid=_eid(), etype=et, sid=sid, ts=ts,
+                           actor=operator_id, target=user_id,
+                           extra={"duration": duration, "self_action": True})
         return QQEvent(eid=_eid(), etype=et, sid=sid, ts=ts,
                        actor=operator_id, target=user_id,
                        extra={"duration": duration})

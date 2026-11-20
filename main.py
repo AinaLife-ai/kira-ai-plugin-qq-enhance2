@@ -50,6 +50,9 @@ class QQEnhance2Plugin(BasePlugin):
         self.collect_emoji_like = self.plugin_cfg.get("collect_emoji_like", True)
         self.collect_emoji_like_env = self.plugin_cfg.get("collect_emoji_like_env", False)
         self.collect_group_ban = self.plugin_cfg.get("collect_group_ban", True)
+        # 自己的禁言/解禁操作（两个独立开关，默认关；给"自动禁言系统"复盘用）
+        self.collect_self_ban = self.plugin_cfg.get("collect_self_ban", False)
+        self.collect_self_unban = self.plugin_cfg.get("collect_self_unban", False)
         self.collect_recall = self.plugin_cfg.get("collect_recall", True)
         self.collect_member_decrease = self.plugin_cfg.get("collect_member_decrease", True)
         self.collect_title = self.plugin_cfg.get("collect_title", False)
@@ -280,7 +283,8 @@ class QQEnhance2Plugin(BasePlugin):
         Returns:
             True = 已入 store；False = 因涉及自己而跳过。
         """
-        if involves_self(ev, self_id):
+        # 自己的禁言操作（self_action）是显式允许的"与自己有关"事件
+        if involves_self(ev, self_id) and not ev.extra.get("self_action"):
             if self.debug_log:
                 logger.info(
                     f"[QQ增强2] 跳过与 bot 相关的事件（不进群动态）: "
@@ -302,7 +306,12 @@ class QQEnhance2Plugin(BasePlugin):
             事件类型集合。
         """
         # 退群/被踢不进摘要（改走 notice 唤醒，对齐 QQ增强1 的入群感知）
-        types = {E_POKE, E_EMOJI_LIKE, E_BAN, E_UNBAN, E_TITLE, E_CARD, E_ADMIN}
+        types = {E_POKE, E_EMOJI_LIKE, E_TITLE, E_CARD, E_ADMIN}
+        if self.collect_group_ban or self.collect_self_ban:
+            types.add(E_BAN)
+        # 解禁：自己开了禁言/解禁任一项都要取（配对用），是否单独成行看 show_self_unban
+        if self.collect_group_ban or self.collect_self_ban or self.collect_self_unban:
+            types.add(E_UNBAN)
         if self.recall_in_env:
             types.add(E_RECALL)
         return types
@@ -636,6 +645,8 @@ class QQEnhance2Plugin(BasePlugin):
             sid=sid,
             self_id=cur_self_id,
             group_id=group_id,
+            collect_self_ban=self.collect_self_ban,
+            collect_self_unban=self.collect_self_unban,
         )
         if not qq_event:
             return
@@ -686,8 +697,17 @@ class QQEnhance2Plugin(BasePlugin):
             return
         if qq_event.etype == E_EMOJI_LIKE and not self.collect_emoji_like:
             return
-        if qq_event.etype in (E_BAN, E_UNBAN) and not self.collect_group_ban:
-            return
+        if qq_event.etype in (E_BAN, E_UNBAN):
+            # 自己的操作与"他人被禁言"是两个独立开关；自己的禁言/解禁再各自独立
+            if qq_event.extra.get("self_action"):
+                if qq_event.etype == E_BAN:
+                    if not self.collect_self_ban:
+                        return
+                elif not (self.collect_self_ban or self.collect_self_unban):
+                    # 解禁事件即使不展示也要收（给禁言条目配对"（已解除）"）
+                    return
+            elif not self.collect_group_ban:
+                return
         if qq_event.etype == E_RECALL and not self.collect_recall:
             return
         if qq_event.etype == E_MEMBER_DECREASE and not self.collect_member_decrease:
@@ -879,7 +899,10 @@ class QQEnhance2Plugin(BasePlugin):
             adapter_name_env = sid.split(":", 1)[0] if ":" in sid else ""
             cur_self_id_env = self._self_id_for_event(adapter_name_env, event)
             if cur_self_id_env:
-                events = [e for e in events if not involves_self(e, cur_self_id_env)]
+                events = [
+                    e for e in events
+                    if not involves_self(e, cur_self_id_env) or e.extra.get("self_action")
+                ]
             env_text = render_env_summary(
                 events,
                 max_per_type=self.perceive_max_per_type,
@@ -890,6 +913,7 @@ class QQEnhance2Plugin(BasePlugin):
                 expiry_announced=self._ban_expiry_announced,
                 # 私聊不写"群动态"：会话里只有用户和 bot 两方
                 is_group=(":gm:" in sid),
+                show_self_unban=self.collect_self_unban,
             )
             if env_text:
                 # 插入到 user_prompt 最前（persist=False，不污染历史）
