@@ -41,6 +41,16 @@ _AVATAR_DESC_TTL = 60.0
 _AVATAR_DESC_MAX = 128
 
 
+# 协议端常用占位值（不是真实资料，展示时当作空）
+_PLACEHOLDER_VALUES = {"-", "—", "--", "——", "无", "未知", "null", "none", "n/a", "na", "0"}
+
+
+def _clean_text(value) -> str:
+    """去掉首尾空白，并把 "-"/"无"/"N/A" 这类占位值当作空。"""
+    text = str(value or "").strip()
+    return "" if text.lower() in _PLACEHOLDER_VALUES else text
+
+
 class QQProfileTool(BaseTool):
     """QQ 用户资料工具（读+写合体）。"""
 
@@ -435,6 +445,7 @@ class QQProfileTool(BaseTool):
             data, "long_nick", "longNick", "longnick",
             "sign", "personal_note", "personalNote",
         )
+        personal_note = _clean_text(personal_note)
         sex_str = self._normalize_sex(data.get("sex"))
 
         # 头像：API 字段 → get_qq_avatar → 腾讯 CDN（按 QQ 号直出）
@@ -467,7 +478,7 @@ class QQProfileTool(BaseTool):
                 logger.debug(f"[QQ增强2] 群名片查询失败: {group_id}/{qq}: {e}")
                 member = {}
             if member:
-                card = str(member.get("card") or "").strip()
+                card = _clean_text(member.get("card"))
                 role_map = {"owner": "群主", "admin": "管理员", "member": "成员"}
                 role = role_map.get(str(member.get("role") or ""), "")
                 card_line = f"  群名片：{card or '（无）'}\n"
@@ -540,7 +551,7 @@ class QQProfileTool(BaseTool):
     @staticmethod
     def _remark_line(data: dict) -> str:
         """好友备注行（为空或与昵称相同则不要）。"""
-        remark = str((data or {}).get("remark") or "").strip()
+        remark = _clean_text((data or {}).get("remark"))
         nick = str((data or {}).get("nickname") or "").strip()
         if remark and remark != nick:
             return f"  备注：{remark}\n"
@@ -584,7 +595,7 @@ class QQProfileTool(BaseTool):
             lines.append(f"  生日：{by}年\n")
 
         # QID
-        qid = str(data.get("qid") or "").strip()
+        qid = _clean_text(data.get("qid"))
         if qid:
             lines.append(f"  QID：{qid}\n")
 
@@ -610,25 +621,24 @@ class QQProfileTool(BaseTool):
 
         # 地区（province 只有部分协议端提供）
         region = " ".join(
-            str(data.get(k) or "").strip()
-            for k in ("country", "province", "city")
-            if str(data.get(k) or "").strip()
+            part for part in (_clean_text(data.get(k)) for k in ("country", "province", "city"))
+            if part
         )
         if region:
             lines.append(f"  地区：{region}\n")
 
         # 学校
-        school = str(data.get("college") or data.get("school") or "").strip()
+        school = _clean_text(data.get("college") or data.get("school"))
         if school:
             lines.append(f"  学校：{school}\n")
 
         # 邮箱 / 电话（资料卡公开才有）
-        email = str(data.get("email") or data.get("eMail") or "").strip()
+        email = _clean_text(data.get("email") or data.get("eMail"))
         if email:
             lines.append(f"  邮箱：{email}\n")
-        phone = str(
-            data.get("phone_num") or data.get("phoneNum") or data.get("phone") or ""
-        ).strip()
+        phone = _clean_text(
+            data.get("phone_num") or data.get("phoneNum") or data.get("phone")
+        )
         if phone:
             lines.append(f"  电话：{phone}\n")
 

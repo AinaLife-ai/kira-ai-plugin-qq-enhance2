@@ -43,6 +43,10 @@ _L1_MAX = 128
 # VLM 的 wait_for 里 → 图片稍慢就报“识别超时”，而模型根本没跑。
 DOWNLOAD_TIMEOUT = 10.0
 
+# 下载失败重试：原 URL 重试一次 + 备用节点一次（QQ 头像 CDN 有 q1~q4）
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAY = 0.25
+
 
 # 失败原因去重（同一 URL+原因只告警一次，避免刷日志）
 _WARNED: "OrderedDict[str, float]" = OrderedDict()
@@ -104,31 +108,96 @@ async def _md5_of_file(path: str) -> str:
     return await asyncio.to_thread(_read)
 
 
+def _avatar_candidates(url: str) -> list[str]:
+    """返回下载候选 URL：原地址 + 同 CDN 的备用节点（仅 QQ 头像 q1~q4）。
+
+    群头像 `p.qlogo.cn/gh/...` 没有备用节点，只重试原地址。
+    """
+    import re
+
+    out = [url]
+    m = re.match(r"^(https?)://q([1-4])\.qlogo\.cn/(.*)$", url)
+    if m:
+        scheme, cur, rest = m.group(1), m.group(2), m.group(3)
+        for host in ("1", "2", "3", "4"):
+            if host != cur:
+                out.append(f"{scheme}://q{host}.qlogo.cn/{rest}")
+    return out
+
+
+def _is_client_error(exc: BaseException) -> bool:
+    """4xx（例如头像不存在）没必要重试。"""
+    try:
+        import httpx
+
+        return isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500
+    except Exception:
+        return False
+
+
+def _err_text(exc: BaseException) -> str:
+    """异常转可读文本（httpx 的 ConnectError 常常 str(e) 为空）。"""
+    msg = str(exc).strip()
+    if not msg:
+        msg = repr(exc)
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        detail = str(cause).strip() or repr(cause)
+        msg += f" ← {type(cause).__name__}: {detail}"
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"下载超时（>{DOWNLOAD_TIMEOUT:g}秒）"
+    try:
+        import httpx
+
+        if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
+            msg += "（网络连接被中断，可能是头像 CDN 抖动，可稍后重试）"
+    except Exception:
+        pass
+    return msg[:200]
+
+
 async def _prepare_image(url: str, timeout: float = DOWNLOAD_TIMEOUT):
-    """下载图片到本地临时文件并计算内容 md5。
+    """下载图片到本地临时文件并计算内容 md5（带重试与备用节点）。
 
     **必须先下载**：框架 `Image.to_base64()` 对 `url` 类型会重新
     `get_file_content()` 再下载一次；若直接把 url 元素交给 `desc_img`，
-    这次下载会发生在 VLM 的 wait_for 里 —— 图片稍慢就变成"识别超时"，
-    而模型根本没跑。这里先落到本地，再用 **path 类型**元素交给 VLM，
-    `to_base64()` 直接读文件，不再联网。
+    这次下载会发生在 VLM 的 wait_for 里 —— 图片稍慢就变成"识别超时"。
+
+    网络类失败（ConnectError/Timeout）重试：原地址再试一次，再换备用节点一次；
+    4xx（头像不存在）不重试。
 
     Args:
         url: 图片 URL。
-        timeout: 下载超时（秒）。
+        timeout: 单次下载超时（秒）。
 
     Returns:
         (本地文件路径, 内容 md5)。
 
     Raises:
-        asyncio.TimeoutError: 下载超时。
-        Exception: 其他下载/解析错误。
+        Exception: 重试后仍失败时抛最后一次异常。
     """
-    img = Image(url)
-    path = await asyncio.wait_for(img.to_path(), timeout=timeout)
-    md5 = await _md5_of_file(path)
-    img.md5 = md5  # 框架若再次 hash_image() 不必重复下载
-    return path, md5
+    candidates = _avatar_candidates(url)
+    plan = [candidates[0]]
+    if len(plan) < DOWNLOAD_ATTEMPTS:
+        plan.append(candidates[0])          # 原地址重试
+    if len(candidates) > 1 and len(plan) < DOWNLOAD_ATTEMPTS:
+        plan.append(candidates[1])          # 备用节点
+
+    last_error: Exception | None = None
+    for i, candidate in enumerate(plan):
+        try:
+            img = Image(candidate)
+            path = await asyncio.wait_for(img.to_path(), timeout=timeout)
+            md5 = await _md5_of_file(path)
+            img.md5 = md5  # 框架若再次 hash_image() 不必重复下载
+            return path, md5
+        except Exception as e:  # noqa: PERF203 - 需要按异常类型决定是否重试
+            last_error = e
+            if _is_client_error(e):
+                break
+            if i + 1 < len(plan):
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+    raise last_error if last_error else RuntimeError("头像下载失败")
 
 def _resolve_desc_img():
     """取当前的 desc_img 实现（优先真框架模块，支持运行时补丁）。"""
@@ -210,7 +279,7 @@ async def describe_avatar_ex(
         _warn_once(url, reason)
         return "", reason
     except Exception as e:
-        reason = f"图片下载失败（{type(e).__name__}: {str(e)[:100]}）"
+        reason = f"图片下载失败（{_err_text(e)}）"
         _warn_once(url, reason)
         return "", reason
 
@@ -248,7 +317,7 @@ async def describe_avatar_ex(
         _warn_once(url, reason)
         return "", reason
     except Exception as e:
-        reason = f"识别失败（{type(e).__name__}: {str(e)[:120]}）"
+        reason = f"识别失败（{_err_text(e)}）"
         _warn_once(url, reason)
         return "", reason
 

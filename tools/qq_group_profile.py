@@ -370,6 +370,8 @@ class QQGroupProfileTool(BaseTool):
                 data.get("group_memo") or data.get("groupMemo")
                 or data.get("group_description") or data.get("groupDescription") or ""
             ).strip()
+            if memo.lower() in {"-", "—", "--", "无", "null", "none", "n/a"}:
+                memo = ""
             if memo:
                 if len(memo) > 100:
                     memo = memo[:100] + "…"
