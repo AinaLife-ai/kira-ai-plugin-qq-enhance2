@@ -609,7 +609,7 @@ class QQEnhance2Plugin(BasePlugin):
             return
 
         # 只处理 QQ 平台
-        if event.adapter.platform != "QQ":
+        if str(getattr(event.adapter, "platform", "")).upper() != "QQ":
             return
 
         # 只处理 notice 事件
@@ -973,7 +973,7 @@ class QQEnhance2Plugin(BasePlugin):
         所以这里始终按事件所属适配器实时解析（晚绑定）。
         """
         # 只处理 QQ 平台
-        if getattr(event.adapter, "platform", "") != "QQ":
+        if str(getattr(event.adapter, "platform", "")).upper() != "QQ":
             return
 
         # 按会话的适配器取（多号部署时用对应账号）
