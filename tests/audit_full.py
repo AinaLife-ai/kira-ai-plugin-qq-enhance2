@@ -107,21 +107,28 @@ def a_readme_keys():
 # ============ B. 导入完整性 ============
 
 def b_imports():
-    """检查所有相对导入的目标文件存在。"""
+    """检查相对导入目标存在；tools 不得直接 import qq_core（真实安装会失败）。"""
     problems = []
     for py in list(PLUGIN_ROOT.glob("main.py")) + list((PLUGIN_ROOT / "qq_core").glob("*.py")) + list((PLUGIN_ROOT / "tools").glob("*.py")):
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level > 0:
-                # 相对导入
-                if node.module:
-                    target = py.parent / (node.module.replace(".", "/") + ".py")
-                    pkg_init = py.parent / node.module.replace(".", "/") / "__init__.py"
-                    if not target.exists() and not pkg_init.exists():
-                        problems.append(f"{py.name}: .{node.module} 不存在")
+            if isinstance(node, ast.ImportFrom) and node.level > 0 and node.module:
+                # level=1 → 当前目录；level=2 → 上一级（插件根）……（旧实现只按 level=1 算，会误报）
+                base = py.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                rel = node.module.replace(".", "/")
+                target = base / (rel + ".py")
+                pkg_init = base / rel / "__init__.py"
+                if not target.exists() and not pkg_init.exists():
+                    problems.append(f"{py.name}: {'.' * node.level}{node.module} 不存在")
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                # 真实插件环境里 qq_core 不是顶层包，tools 必须走 tools/_bridge.py
+                if py.parent.name == "tools" and node.module.split(".")[0] == "qq_core":
+                    problems.append(f"{py.name}: 直接 import {node.module}（真实安装不可用，应走 _bridge）")
     if problems:
         return False, "; ".join(problems)
-    return True, "所有相对导入可解析"
+    return True, "所有相对导入可解析；tools 未直接依赖顶层 qq_core"
 
 
 def b_compile_all():
@@ -143,7 +150,7 @@ def c_tool_contract():
     """检查工具类定义符合框架 BaseTool 契约。"""
     problems = []
     for tf in (PLUGIN_ROOT / "tools").glob("*.py"):
-        if tf.name == "__init__.py":
+        if tf.name == "__init__.py" or tf.name.startswith("_"):
             continue
         src = tf.read_text(encoding="utf-8")
         tree = ast.parse(src)
@@ -265,7 +272,7 @@ def f_edge_cases():
         problems.append("wake_scheduler 缺异常捕获")
     # 5. tools 适配器为空
     for tf in (PLUGIN_ROOT / "tools").glob("*.py"):
-        if tf.name == "__init__.py":
+        if tf.name == "__init__.py" or tf.name.startswith("_"):
             continue
         s = tf.read_text(encoding="utf-8")
         if "if not self.adapter" not in s:

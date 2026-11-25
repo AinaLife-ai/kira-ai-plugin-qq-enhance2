@@ -27,9 +27,13 @@ logger = get_logger("qq_enhance2.qq_profile", "cyan")
 # 又不会让刚换的头像在描述里停留太久。
 # 只缓存成功结果（失败可能是网络抖动，不该被记住）。
 # 兼容旧引用/测试：**真正的缓存**在 qq_core/avatar_view.py（与群头像共用一套）。
-try:
-    from qq_core.avatar_view import _L1 as _AVATAR_DESC_CACHE
-except ImportError:  # 极端情况下退化为独立字典（只影响测试里的 clear()）
+# 注意：真实插件环境里 qq_core **不是顶层包**，必须走 _bridge（见 tools/_bridge.py），
+# 否则 `from qq_core.avatar_view import ...` 会 ImportError（实机头像识别失败）。
+from ._bridge import load as _load_qq_core
+
+_avatar_view_mod = _load_qq_core("avatar_view")
+_AVATAR_DESC_CACHE = getattr(_avatar_view_mod, "_L1", None) if _avatar_view_mod else None
+if _AVATAR_DESC_CACHE is None:  # 极端情况：退化为独立字典（只影响测试里的 clear()）
     _AVATAR_DESC_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _AVATAR_DESC_TTL = 60.0
 _AVATAR_DESC_MAX = 128
@@ -592,11 +596,11 @@ class QQProfileTool(BaseTool):
         Returns:
             头像描述文本；失败时返回空串。
         """
-        try:
-            from qq_core.avatar_view import describe_avatar_ex
-        except ImportError:
-            self._avatar_desc_reason = "框架缺少 avatar_view 模块"
+        avatar_view = _load_qq_core("avatar_view")
+        if avatar_view is None or not hasattr(avatar_view, "describe_avatar_ex"):
+            self._avatar_desc_reason = "插件安装不完整（缺少 qq_core/avatar_view.py）"
             return ""
+        describe_avatar_ex = avatar_view.describe_avatar_ex
 
         vlm = None
         try:
@@ -660,20 +664,9 @@ class QQProfileTool(BaseTool):
         Returns:
             (uri, error)。error 为空表示可用。
         """
-        try:
-            from qq_core.fmt import file_to_protocol_uri
-            return file_to_protocol_uri(value)
-        except ImportError:
-            pass
-        try:
-            import importlib
-            parts = __name__.split(".")
-            if len(parts) >= 2:
-                parent_pkg = ".".join(parts[:-1])
-                mod = importlib.import_module(f"{parent_pkg}.qq_core.fmt")
-                return mod.file_to_protocol_uri(value)
-        except Exception:
-            pass
+        fmt = _load_qq_core("fmt")
+        if fmt is not None and hasattr(fmt, "file_to_protocol_uri"):
+            return fmt.file_to_protocol_uri(value)
         # 兜底：只做前缀归一化（不读文件）
         return QQProfileTool._normalize_file_uri(value), ""
 
@@ -697,22 +690,10 @@ class QQProfileTool(BaseTool):
         Returns:
             归一化后的字符串（空输入返回空串）。
         """
-        # 优先用 qq_core.fmt 的实现（统一维护）
-        try:
-            from qq_core.fmt import normalize_file_uri
-            return normalize_file_uri(value)
-        except ImportError:
-            pass
-        # 框架内加载时（plugins.<id>.tools）走包内相对定位
-        try:
-            import importlib
-            parts = __name__.split(".")
-            if len(parts) >= 2:
-                parent_pkg = ".".join(parts[:-1])  # plugins.<id>
-                mod = importlib.import_module(f"{parent_pkg}.qq_core.fmt")
-                return mod.normalize_file_uri(value)
-        except Exception:
-            pass
+        # 优先用 qq_core.fmt 的实现（统一维护；真实安装必须走 _bridge）
+        fmt = _load_qq_core("fmt")
+        if fmt is not None and hasattr(fmt, "normalize_file_uri"):
+            return fmt.normalize_file_uri(value)
         # 最后兜底：就地实现（极简版）
         import re as _re
         s = str(value or "").strip()
