@@ -225,7 +225,11 @@ class QQEnhance2Plugin(BasePlugin):
         try:
             cfg = getattr(self.ctx, "config", None)
             getter = getattr(cfg, "get_config", None)
-            ref = getter("models.default_vlm", "") if callable(getter) else ""
+            ref = ""
+            if callable(getter):
+                ref = getter("models.default_vlm", "")
+            elif isinstance(cfg, dict):
+                ref = (cfg.get("models") or {}).get("default_vlm", "")
             if not ref:
                 logger.warning(
                     "[QQ增强2] 未配置 models.default_vlm（默认视觉模型）："
