@@ -84,7 +84,9 @@ async def test_tools_defined():
     tools_dir = PLUGIN_ROOT / "tools"
     assert tools_dir.exists(), "tools 目录不存在"
 
-    tool_files = [f for f in tools_dir.glob("*.py") if f.stem != "__init__"]
+    # 下划线开头的是内部辅助模块（如 _bridge），不是工具
+    tool_files = [f for f in tools_dir.glob("*.py")
+                  if f.stem != "__init__" and not f.stem.startswith("_")]
     tool_names = [f.stem for f in tool_files]
     assert "qq_profile" in tool_names
     assert "qq_group_profile" in tool_names

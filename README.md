@@ -177,6 +177,32 @@
 ## 更新日志
 
 <details>
+<summary><b>v1.2.0</b>（2026-11-25）— 修复真实安装下头像识别失效（tools 导入桥）</summary>
+
+### 🐞 头像只显示 URL / 报"框架缺少 avatar_view 模块"
+- **根因**：`tools/*` 里写的是 `from qq_core.avatar_view import ...`。真实安装时插件被加载成
+  `plugins.<目录>` 包，**`qq_core` 不是顶层包** ⇒ ImportError。v1.1.7/1.1.8 静默返回空描述
+  （只显示链接），v1.1.9 加了失败原因后才暴露出来。
+- **影响面**：`qq_profile` 看头像、`qq_group_profile(look_group_avatar)` 看群头像，
+  以及头像设置用的 `file_to_protocol_uri` / `normalize_file_uri`（本地文件 → base64）。
+- **修复**：新增 `tools/_bridge.py`，用 importlib 按当前包逐级解析，
+  兼容「真实安装 `plugins.<目录>`」「包内加载」「测试顶层」三种布局；上述四处全部改走桥。
+- **回归防护**：`tests/adapter_late_bind_check.py` 会把插件根目录从 `sys.path` 移除、
+  清掉顶层 `qq_core`，再验证头像/群头像识别、本地文件→base64、**所有插件模块可导入**（16 项）。
+- `audit_full` 新增规则：tools 下不得直接 `from qq_core...`（必须走 `_bridge`）。
+
+### 🧹 配置项文案统一
+- 所有配置项的 name / hint 改为**纯文本**（前端不渲染 Markdown，`**加粗**`、反引号、换行会原样显示）
+- hint 统一成一句话说清「做什么 + 默认值/关闭后什么效果」，非技术用户也能看懂
+
+### ✅ 验证
+pytest **182**；KiraAI **v3.3.0 / v3.1.2** 双版本
+self_scope 46 / config 25 / deep 30 / scenario 27 / safety 35 / edge 23 / robustness 34 /
+audit_full 14 / 前后端 10 / avatar 52 / late-bind 16 全绿。
+
+</details>
+
+<details>
 <summary><b>v1.1.9</b>（2026-11-25）— 适配器实时绑定 / 工具不再消失 / 头像失败可见</summary>
 
 ### 🐞 工具列表里看不到 qq_profile（用户实机）

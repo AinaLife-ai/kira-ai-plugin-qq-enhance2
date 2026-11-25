@@ -16,6 +16,8 @@ from core.chat.message_utils import KiraMessageBatchEvent
 from core.utils.tool_utils import BaseTool
 from core.plugin import PluginContext
 
+from ._bridge import load as _load_qq_core
+
 logger = get_logger("qq_enhance2.qq_group_profile", "cyan")
 
 
@@ -85,19 +87,9 @@ class QQGroupProfileTool(BaseTool):
         Returns:
             (uri, error)。
         """
-        try:
-            from qq_core.fmt import file_to_protocol_uri
-            return file_to_protocol_uri(value)
-        except ImportError:
-            pass
-        try:
-            import importlib
-            parts = __name__.split(".")
-            parent_pkg = ".".join(parts[:-1]) if len(parts) >= 2 else "qq_core"
-            mod = importlib.import_module(f"{parent_pkg}.qq_core.fmt")
-            return mod.file_to_protocol_uri(value)
-        except Exception:
-            pass
+        fmt = _load_qq_core("fmt")
+        if fmt is not None and hasattr(fmt, "file_to_protocol_uri"):
+            return fmt.file_to_protocol_uri(value)
         return str(value or ""), ""
 
     def _resolve_self_id(self, event=None) -> str:
@@ -326,11 +318,11 @@ class QQGroupProfileTool(BaseTool):
         Returns:
             描述文本；失败返回空串。
         """
-        try:
-            from qq_core.avatar_view import describe_avatar_ex
-        except ImportError:
-            self._avatar_desc_reason = "框架缺少 avatar_view 模块"
+        avatar_view = _load_qq_core("avatar_view")
+        if avatar_view is None or not hasattr(avatar_view, "describe_avatar_ex"):
+            self._avatar_desc_reason = "插件安装不完整（缺少 qq_core/avatar_view.py）"
             return ""
+        describe_avatar_ex = avatar_view.describe_avatar_ex
 
         vlm = None
         try:
