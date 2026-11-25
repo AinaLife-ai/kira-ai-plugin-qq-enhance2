@@ -38,6 +38,11 @@ logger = get_logger("qq_enhance2.avatar", "cyan")
 _L1: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _L1_MAX = 128
 
+# 图片下载单独超时（秒）。必须与 VLM 超时分开：
+# 框架 Image.to_base64() 对 url 类型会**重新下载**，旧实现把这段下载算进了
+# VLM 的 wait_for 里 → 图片稍慢就报“识别超时”，而模型根本没跑。
+DOWNLOAD_TIMEOUT = 10.0
+
 
 # 失败原因去重（同一 URL+原因只告警一次，避免刷日志）
 _WARNED: "OrderedDict[str, float]" = OrderedDict()
@@ -99,27 +104,31 @@ async def _md5_of_file(path: str) -> str:
     return await asyncio.to_thread(_read)
 
 
-async def _prepare_image(url: str, need_md5: bool):
-    """构造 Image 元素；需要时下载一次并算出内容 md5。
+async def _prepare_image(url: str, timeout: float = DOWNLOAD_TIMEOUT):
+    """下载图片到本地临时文件并计算内容 md5。
 
-    `Image.to_path()` 会把下载结果缓存在元素内部，后续 `desc_img` 复用它，
-    所以"算 md5"不会造成第二次下载。
+    **必须先下载**：框架 `Image.to_base64()` 对 `url` 类型会重新
+    `get_file_content()` 再下载一次；若直接把 url 元素交给 `desc_img`，
+    这次下载会发生在 VLM 的 wait_for 里 —— 图片稍慢就变成"识别超时"，
+    而模型根本没跑。这里先落到本地，再用 **path 类型**元素交给 VLM，
+    `to_base64()` 直接读文件，不再联网。
 
     Args:
         url: 图片 URL。
-        need_md5: 是否需要 md5（只有真能用上 L2 缓存时才值得下载）。
+        timeout: 下载超时（秒）。
 
     Returns:
-        (image, md5)；md5 取不到时为空串。构造失败抛异常，由调用方兜底。
+        (本地文件路径, 内容 md5)。
+
+    Raises:
+        asyncio.TimeoutError: 下载超时。
+        Exception: 其他下载/解析错误。
     """
     img = Image(url)
-    if not need_md5:
-        return img, ""
-    path = await img.to_path()
+    path = await asyncio.wait_for(img.to_path(), timeout=timeout)
     md5 = await _md5_of_file(path)
     img.md5 = md5  # 框架若再次 hash_image() 不必重复下载
-    return img, md5
-
+    return path, md5
 
 def _resolve_desc_img():
     """取当前的 desc_img 实现（优先真框架模块，支持运行时补丁）。"""
@@ -190,17 +199,20 @@ async def describe_avatar_ex(
         _warn_once(url, reason)
         return "", reason
 
-    # ---- 图片 + 内容 md5（只有能用上 L2 才下载）----
+    # ---- 下载（独立超时）+ 内容 md5 ----
     fw_cache = _framework_cache(ctx) if ttl > 0 else None
-    img = None
     md5 = ""
-    prepare_error = ""
+    path = ""
     try:
-        img, md5 = await _prepare_image(url, need_md5=fw_cache is not None)
+        path, md5 = await _prepare_image(url)
+    except asyncio.TimeoutError:
+        reason = f"图片下载超时（>{DOWNLOAD_TIMEOUT:g}秒，请检查服务器能否访问头像 CDN）"
+        _warn_once(url, reason)
+        return "", reason
     except Exception as e:
-        prepare_error = f"{type(e).__name__}: {e}"
-        logger.debug(f"[QQ增强2] 头像准备失败（转为直接识别）: {url}: {e}")
-        img = None
+        reason = f"图片下载失败（{type(e).__name__}: {str(e)[:100]}）"
+        _warn_once(url, reason)
+        return "", reason
 
     # ---- L2：框架 ImageDescCache（按内容 md5，落库、重启仍在）----
     if fw_cache is not None and md5:
@@ -213,14 +225,13 @@ async def describe_avatar_ex(
         except Exception as e:
             logger.debug(f"[QQ增强2] 读 ImageDescCache 失败: {e}")
 
-    # ---- VLM ----
-    if img is None:
-        try:
-            img = Image(url)
-        except Exception as e:
-            reason = f"图片地址无效（{type(e).__name__}: {e}）"
-            _warn_once(url, reason)
-            return "", reason
+    # ---- VLM（用本地文件元素，避免框架二次下载）----
+    try:
+        img = Image(path)
+    except Exception as e:
+        reason = f"图片地址无效（{type(e).__name__}: {e}）"
+        _warn_once(url, reason)
+        return "", reason
     desc_fn = _resolve_desc_img()
     if desc_fn is None:
         reason = "框架缺少 desc_img（core.utils.common_utils 不兼容）"
@@ -238,8 +249,6 @@ async def describe_avatar_ex(
         return "", reason
     except Exception as e:
         reason = f"识别失败（{type(e).__name__}: {str(e)[:120]}）"
-        if prepare_error:
-            reason += f"；图片准备也失败（{prepare_error[:80]}）"
         _warn_once(url, reason)
         return "", reason
 
