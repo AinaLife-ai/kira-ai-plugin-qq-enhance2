@@ -227,6 +227,12 @@
         "default": true,
         "hint": "启用 qq_profile（查询和修改个人资料）和 qq_group_profile（群名片、头衔、群头像）两个工具。"
     },
+    "profile_detail": {
+        "name": "资料显示详细信息",
+        "type": "switch",
+        "default": true,
+        "hint": "查询资料时显示年龄、生日、QID、QQ等级、注册时间、地区、学校、邮箱、会员等详细信息，群资料里还有建群时间、群等级、简介。关闭后只显示昵称、群名片、签名、性别、头像等基础信息。"
+    },
     "avatar_describe": {
         "name": "查询资料时识别头像",
         "type": "switch",

@@ -93,6 +93,8 @@ class QQEnhance2Plugin(BasePlugin):
         self.recall_show_content = self.plugin_cfg.get("recall_show_content", True)
 
         self.tools_profile = self.plugin_cfg.get("tools_profile", True)
+        # 资料工具是否显示详细信息（年龄/生日/地区/群等级等）；关闭只显示基础字段
+        self.profile_detail = self.plugin_cfg.get("profile_detail", True)
         self.avatar_describe = self.plugin_cfg.get("avatar_describe", True)
         self.avatar_desc_prompt = self.plugin_cfg.get("avatar_desc_prompt", "") or ""
         self.avatar_desc_timeout = _safe_float(self.plugin_cfg.get("avatar_desc_timeout"), 20.0)
@@ -1038,9 +1040,11 @@ class QQEnhance2Plugin(BasePlugin):
                                            avatar_desc_prompt=self.avatar_desc_prompt,
                                            avatar_desc_timeout=self.avatar_desc_timeout,
                                            avatar_describe=self.avatar_describe,
-                                           avatar_desc_cache_seconds=self.avatar_desc_cache_seconds))
+                                           avatar_desc_cache_seconds=self.avatar_desc_cache_seconds,
+                                           profile_detail=self.profile_detail))
             req.tool_set.add(QQGroupProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,
                                                 avatar_desc_prompt=self.avatar_desc_prompt,
                                                 avatar_desc_timeout=self.avatar_desc_timeout,
                                                 avatar_describe=self.avatar_describe,
-                                                avatar_desc_cache_seconds=self.avatar_desc_cache_seconds))
+                                                avatar_desc_cache_seconds=self.avatar_desc_cache_seconds,
+                                                profile_detail=self.profile_detail))

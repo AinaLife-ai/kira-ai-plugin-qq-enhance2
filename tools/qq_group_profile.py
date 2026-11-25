@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime
 
 from core.logging_manager import get_logger
 from core.chat.message_utils import KiraMessageBatchEvent
@@ -59,7 +61,8 @@ class QQGroupProfileTool(BaseTool):
     def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
                  avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0,
                  avatar_describe: bool = True,
-                 avatar_desc_cache_seconds: float = 60.0):
+                 avatar_desc_cache_seconds: float = 60.0,
+                 profile_detail: bool = True):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
@@ -67,6 +70,8 @@ class QQGroupProfileTool(BaseTool):
         self.avatar_desc_prompt = avatar_desc_prompt or ""
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
         self.avatar_describe = bool(avatar_describe)
+        # 是否显示详细信息（群成员：性别/年龄/群等级/入群时间；群资料：建群时间/群等级/简介等）
+        self.profile_detail = bool(profile_detail)
         # 最近一次头像识别的失败原因
         self._avatar_desc_reason = ""
         try:
@@ -266,6 +271,27 @@ class QQGroupProfileTool(BaseTool):
             err_note = f"{type(e).__name__}: {e}"
             logger.debug(f"[QQ增强2] get_group_info 失败: {group_id}: {e}")
 
+        # 详细信息：部分协议端（NapCat / LLOneBot）有 get_group_info_ex，能补建群时间/群等级/简介
+        if self.profile_detail:
+            try:
+                ex_resp = await asyncio.wait_for(
+                    self.adapter.bot.send_action("get_group_info_ex", {"group_id": group_id}),
+                    timeout=5.0,
+                )
+                ex_data = (ex_resp or {}).get("data") or {}
+                if isinstance(ex_data, dict):
+                    for k, v in ex_data.items():
+                        if v not in (None, "", 0) and not data.get(k):
+                            data[k] = v
+                    # 有的协议端把群信息放在 groupExtInfo 里
+                    nested = ex_data.get("groupExtInfo") or ex_data.get("groupExtInfos")
+                    if isinstance(nested, dict):
+                        for k, v in nested.items():
+                            if v not in (None, "", 0) and not data.get(k):
+                                data[k] = v
+            except Exception as e:
+                logger.debug(f"[QQ增强2] get_group_info_ex 不可用: {group_id}: {e}")
+
         name = str(data.get("group_name") or "")
         remark = str(data.get("group_remark") or "")
         try:
@@ -289,8 +315,65 @@ class QQGroupProfileTool(BaseTool):
             lines.append(
                 f"  人数：{member_count}" + (f"/{max_count}" if max_count else "")
             )
-        if data.get("group_all_shut") in (-1, True):
-            lines.append("  全员禁言：开启")
+
+        if self.profile_detail:
+            # 建群时间（三家字段名不同）
+            create_ts = 0
+            for key in ("group_create_time", "groupCreateTime", "create_time",
+                        "createTime", "groupCreateTimestamp"):
+                try:
+                    create_ts = int(data.get(key) or 0)
+                except (TypeError, ValueError):
+                    create_ts = 0
+                if create_ts > 0:
+                    break
+            if create_ts > 0:
+                try:
+                    dt = datetime.fromtimestamp(create_ts)
+                    years = max(0.0, (time.time() - create_ts) / (365.25 * 86400))
+                    lines.append(
+                        f"  建群时间：{dt:%Y-%m-%d}（约 {years:.1f} 年）" if years >= 1
+                        else f"  建群时间：{dt:%Y-%m-%d}"
+                    )
+                except (OverflowError, OSError, ValueError):
+                    pass
+
+            # 群等级
+            try:
+                group_level = int(data.get("group_level") or data.get("groupLevel") or 0)
+            except (TypeError, ValueError):
+                group_level = 0
+            if group_level > 0:
+                lines.append(f"  群等级：{group_level}")
+
+            # 全员禁言：**只在开启时显示**（关闭/字段缺失都不输出）
+            # group_all_shut: -1 或 1 表示开启，0 表示关闭；部分协议端没有这个字段
+            shut = False
+            raw_shut = data.get("group_all_shut")
+            if raw_shut is True:
+                shut = True
+            else:
+                try:
+                    shut = int(raw_shut) in (-1, 1)
+                except (TypeError, ValueError):
+                    shut = False
+            if not shut:
+                try:
+                    shut = int(data.get("shutUpAllTimestamp") or 0) > 0
+                except (TypeError, ValueError):
+                    shut = False
+            if shut:
+                lines.append("  全员禁言：开启")
+
+            # 群简介 / 公告预览
+            memo = str(
+                data.get("group_memo") or data.get("groupMemo")
+                or data.get("group_description") or data.get("groupDescription") or ""
+            ).strip()
+            if memo:
+                if len(memo) > 100:
+                    memo = memo[:100] + "…"
+                lines.append(f"  群简介：{memo}")
         if avatar_url:
             lines.append(f"  群头像：{avatar_url}")
             if self.avatar_describe:
@@ -393,8 +476,40 @@ class QQGroupProfileTool(BaseTool):
             result = f"用户 {qq} 在群聊中的资料：\n"
             result += f"  群名片：{card or '（无）'}\n"
             result += f"  昵称：{nickname or '（未提供）'}\n"
+
+            # 可选字段：有才显示（三家协议端返回的字段不完全一致）
+            def _int(v):
+                try:
+                    return int(float(v))
+                except (TypeError, ValueError):
+                    return 0
+
+            if self.profile_detail:
+                sex_raw = str(data.get("sex") or "").lower()
+                sex_map = {"male": "男", "female": "女", "unknown": "未知"}
+                if sex_raw in sex_map:
+                    result += f"  性别：{sex_map[sex_raw]}\n"
+                age = _int(data.get("age"))
+                if 0 < age < 200:
+                    result += f"  年龄：{age}\n"
             result += f"  头衔：{title or '（无）'}\n"
             result += f"  角色：{role_str}\n"
+            if self.profile_detail:
+                lvl = _int(data.get("level"))
+                if lvl > 0:
+                    result += f"  群等级：{lvl}\n"
+                join_ts = _int(data.get("join_time"))
+                if join_ts > 0:
+                    try:
+                        result += f"  入群时间：{datetime.fromtimestamp(join_ts):%Y-%m-%d}\n"
+                    except (OverflowError, OSError, ValueError):
+                        pass
+                last_ts = _int(data.get("last_sent_time"))
+                if last_ts > 0:
+                    try:
+                        result += f"  最后发言：{datetime.fromtimestamp(last_ts):%Y-%m-%d %H:%M}\n"
+                    except (OverflowError, OSError, ValueError):
+                        pass
             return result
         except Exception as e:
             logger.debug(f"[QQ增强2] get_group_member_info 失败: {group_id}/{qq}: {e}")

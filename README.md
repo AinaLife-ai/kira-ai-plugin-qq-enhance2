@@ -117,6 +117,7 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `tools_profile` | true | 启用 qq_profile / qq_group_profile |
+| `profile_detail` | true | 资料是否显示详细信息（年龄/生日/地区/群等级等）；关闭只显示基础字段 |
 | `avatar_describe` | true | 查询资料时用视觉模型「看」头像（关=只回头像链接；开启时 bot 也可用 `look_avatar=false` 单次跳过） |
 | `avatar_desc_prompt` | "" | 头像描述提示词，留空=跟随框架 WebUI 图片识别提示词设置 |
 | `avatar_desc_timeout` | 20 | 头像描述超时（秒），超时降级为只显示 URL |
@@ -175,6 +176,63 @@
   （每会话最多 20 条事件，30 秒落盘一次，24 小时 TTL）。
 
 ## 更新日志
+
+<details>
+<summary><b>v1.2.3</b>（2026-11-25）— 资料卡字段补全（年龄/生日/等级/地区等）</summary>
+
+### ✨ qq_profile 新增字段
+以前只显示昵称/群名片/群角色/签名/性别/头像。现在把协议端能给、且确实返回了的字段都带上：
+
+```
+用户 769690776 的资料：
+  昵称：周武
+  备注：老周
+  性别：男
+  年龄：24
+  生日：2001-03-15
+  QID：zhouwu
+  QQ等级：48
+  注册时间：2015-08-11（Q龄约 11 年）
+  地区：中国 江苏 南京
+  学校：南京大学
+  邮箱：a@b.c
+  电话：13800000000
+  会员：超级会员 年费 等级8
+  累计登录：1200 天
+  个性签名：漏舟载酒
+  头像：https://q1.qlogo.cn/g?b=qq&nk=769690776&s=640
+  头像内容：蓝发男生
+```
+
+规则：**有就显示、没有就跳过**，不输出占位，不浪费 token。
+
+### 🎛 新增开关 `profile_detail`（默认开）
+- 开：显示上面的完整字段（群资料里还会显示 群备注/建群时间/群等级/全员禁言/群简介）
+- 关：只显示原来那几项（昵称/群名片/签名/性别/头像；群：群名/人数/头像）
+
+### 🔌 三家协议端字段兼容
+| 字段 | NapCat | SnowLuma | LLOneBot |
+|---|---|---|---|
+| 年龄/性别/签名 | ✓ | ✓ | ✓ |
+| 生日 | 部分 | ✓ birthday_* | ✓ birthday_* |
+| QID | ✓ | ✓ | ✓ |
+| QQ 等级 | qqLevel | qq_level | level |
+| 注册时间 | reg_time | reg_time | reg_time |
+| 地区 | country/province/city | 同左 | country/city |
+| 学校 | — | college | — |
+| 邮箱/电话 | 部分透传 | ✓ | — |
+| 会员 | is_vip/is_years_vip/vip_level | is_vip/is_qq_vip/vip_level | is_svip/is_vip/vip_level |
+| 备注 | ✓ | ✓ | ✓ |
+| 登录天数 | 失效(0) | — | login_days |
+
+### ✨ qq_group_profile 字段补全
+- 群成员：性别、年龄、群等级、入群时间、最后发言
+- 群资料：群备注、建群时间、群等级、全员禁言、群简介（NapCat/LLOneBot 会补拉 `get_group_info_ex`，SnowLuma 的 `get_group_info` 已自带）
+
+### ✅ 验证
+pytest **194**；三家协议端的字段形态各有专门用例；双版本专项全绿。
+
+</details>
 
 <details>
 <summary><b>v1.2.2</b>（2026-11-25）— 头像识别成功时也返回 URL</summary>

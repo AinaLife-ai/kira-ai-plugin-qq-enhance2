@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime
 from collections import OrderedDict
 
 from core.logging_manager import get_logger
@@ -76,7 +78,8 @@ class QQProfileTool(BaseTool):
 
     def __init__(self, ctx: PluginContext, adapter=None, self_id: str = "",
                  avatar_desc_prompt: str = "", avatar_desc_timeout: float = 20.0,
-                 avatar_describe: bool = True, avatar_desc_cache_seconds: float = 60.0):
+                 avatar_describe: bool = True, avatar_desc_cache_seconds: float = 60.0,
+                 profile_detail: bool = True):
         super().__init__(ctx=ctx)
         self.adapter = adapter
         self.self_id = str(self_id) if self_id else ""
@@ -84,6 +87,8 @@ class QQProfileTool(BaseTool):
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
         # 总开关（配置项 avatar_describe）：关掉后连 VLM 都不调，只给头像链接
         self.avatar_describe = bool(avatar_describe)
+        # 是否显示详细信息（年龄/生日/QID/等级/地区/学校/会员等）
+        self.profile_detail = bool(profile_detail)
         # 描述缓存时长（配置项 avatar_desc_cache_seconds）：<=0 表示不缓存，每次都重新识别
         try:
             self.avatar_desc_cache_seconds = float(avatar_desc_cache_seconds)
@@ -490,14 +495,20 @@ class QQProfileTool(BaseTool):
 
         result = f"用户 {qq} 的资料：\n"
         result += f"  昵称：{nickname or '（未提供）'}\n"
-        result += card_line
+        if self.profile_detail:
+            result += self._remark_line(data)
+        result += f"  性别：{sex_str}\n"
+        if self.profile_detail:
+            # 其余可选资料（年龄/生日/QID/等级/注册时间/地区/学校/邮箱/电话/会员/登录天数）
+            for extra_line in self._profile_extra_lines(data):
+                result += extra_line
         if personal_note:
             result += f"  个性签名：{personal_note}\n"
         elif timed_out:
             result += "  个性签名：（协议端未响应，暂无法获取）\n"
         else:
             result += "  个性签名：（该协议端未提供）\n"
-        result += f"  性别：{sex_str}\n"
+        result += card_line
 
         # 头像：读图（VLM 描述），而非只给 URL
         if head_url:
@@ -517,6 +528,130 @@ class QQProfileTool(BaseTool):
         if timed_out:
             result += "  （注：get_stranger_info 超时，以上为可获取到的部分信息）\n"
         return result
+
+    @staticmethod
+    def _to_int(value) -> int:
+        """安全转整数（协议端可能给字符串/None）。"""
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _remark_line(data: dict) -> str:
+        """好友备注行（为空或与昵称相同则不要）。"""
+        remark = str((data or {}).get("remark") or "").strip()
+        nick = str((data or {}).get("nickname") or "").strip()
+        if remark and remark != nick:
+            return f"  备注：{remark}\n"
+        return ""
+
+    @classmethod
+    def _profile_extra_lines(cls, data: dict) -> list[str]:
+        """把协议端返回的可选资料字段转成展示行（有才显示，不占位）。
+
+        兼容三家字段差异：
+          · NapCat    : qqLevel / long_nick / reg_time / is_vip(实为SVIP) / vip_level
+          · SnowLuma  : qq_level / long_nick / reg_time / birthday_* / college / email
+          · LLOneBot  : level / long_nick / reg_time / birthday_* / city / country / is_svip
+
+        Args:
+            data: get_stranger_info 返回的 data。
+
+        Returns:
+            行列表（已带两个空格缩进与换行）。
+        """
+        if not isinstance(data, dict) or not data:
+            return []
+
+        lines: list[str] = []
+
+        # 年龄
+        age = cls._to_int(data.get("age"))
+        if 0 < age < 200:
+            lines.append(f"  年龄：{age}\n")
+
+        # 生日（年/月/日可能只公开一部分）
+        by = cls._to_int(data.get("birthday_year"))
+        bm = cls._to_int(data.get("birthday_month"))
+        bd = cls._to_int(data.get("birthday_day"))
+        if 0 < bm <= 12 and 0 < bd <= 31:
+            if 0 < by <= 9999:
+                lines.append(f"  生日：{by:04d}-{bm:02d}-{bd:02d}\n")
+            else:
+                lines.append(f"  生日：{bm:02d}-{bd:02d}\n")
+        elif 0 < by <= 9999 and not bm:
+            lines.append(f"  生日：{by}年\n")
+
+        # QID
+        qid = str(data.get("qid") or "").strip()
+        if qid:
+            lines.append(f"  QID：{qid}\n")
+
+        # QQ 等级：NapCat=qqLevel，SnowLuma=qq_level，LLOneBot=level
+        lvl = max(
+            cls._to_int(data.get("qq_level")),
+            cls._to_int(data.get("qqLevel")),
+            cls._to_int(data.get("level")),
+        )
+        if lvl > 0:
+            lines.append(f"  QQ等级：{lvl}\n")
+
+        # 注册时间（Q 龄）
+        reg = cls._to_int(data.get("reg_time")) or cls._to_int(data.get("register_time"))
+        if reg > 0:
+            try:
+                dt = datetime.fromtimestamp(reg)
+                years = max(0.0, (time.time() - reg) / (365.25 * 86400))
+                age_txt = f"（Q龄约 {years:.0f} 年）" if years >= 1 else "（Q龄不足 1 年）"
+                lines.append(f"  注册时间：{dt:%Y-%m-%d}{age_txt}\n")
+            except (OverflowError, OSError, ValueError):
+                pass
+
+        # 地区（province 只有部分协议端提供）
+        region = " ".join(
+            str(data.get(k) or "").strip()
+            for k in ("country", "province", "city")
+            if str(data.get(k) or "").strip()
+        )
+        if region:
+            lines.append(f"  地区：{region}\n")
+
+        # 学校
+        school = str(data.get("college") or data.get("school") or "").strip()
+        if school:
+            lines.append(f"  学校：{school}\n")
+
+        # 邮箱 / 电话（资料卡公开才有）
+        email = str(data.get("email") or data.get("eMail") or "").strip()
+        if email:
+            lines.append(f"  邮箱：{email}\n")
+        phone = str(
+            data.get("phone_num") or data.get("phoneNum") or data.get("phone") or ""
+        ).strip()
+        if phone:
+            lines.append(f"  电话：{phone}\n")
+
+        # 会员（NapCat 的 is_vip 实为超级会员；SnowLuma is_vip=超级会员、is_qq_vip=普通）
+        tags: list[str] = []
+        if data.get("is_svip") or (data.get("is_vip") and not data.get("is_qq_vip")):
+            tags.append("超级会员")
+        elif data.get("is_vip") or data.get("is_qq_vip"):
+            tags.append("会员")
+        if data.get("is_years_vip"):
+            tags.append("年费")
+        vip_level = cls._to_int(data.get("vip_level"))
+        if vip_level > 0:
+            tags.append(f"等级{vip_level}")
+        if tags:
+            lines.append(f"  会员：{' '.join(tags)}\n")
+
+        # 累计登录天数（部分协议端返回 0=未知）
+        days = cls._to_int(data.get("login_days"))
+        if 0 < days < 100000:
+            lines.append(f"  累计登录：{days} 天\n")
+
+        return lines
 
     @staticmethod
     def _event_group_id(event) -> str:
