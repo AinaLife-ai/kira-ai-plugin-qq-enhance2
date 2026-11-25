@@ -615,8 +615,9 @@ class QQProfileTool(BaseTool):
             lang=self._get_locale_lang(),
         )
         self._avatar_desc_reason = reason
+        # 告警由 avatar_view._warn_once 统一按"原因"去重；这里只留调试信息
         if reason:
-            logger.warning(f"[QQ增强2] 头像未识别: {head_url} → {reason}")
+            logger.debug(f"[QQ增强2] 头像未识别: {head_url} → {reason}")
         return desc
 
     async def _fetch_avatar_url(self, qq: str) -> str:
