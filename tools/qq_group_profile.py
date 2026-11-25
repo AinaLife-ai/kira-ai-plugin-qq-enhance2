@@ -65,6 +65,8 @@ class QQGroupProfileTool(BaseTool):
         self.avatar_desc_prompt = avatar_desc_prompt or ""
         self.avatar_desc_timeout = float(avatar_desc_timeout or 20.0)
         self.avatar_describe = bool(avatar_describe)
+        # 最近一次头像识别的失败原因
+        self._avatar_desc_reason = ""
         try:
             self.avatar_desc_cache_seconds = float(avatar_desc_cache_seconds)
         except (TypeError, ValueError):
@@ -150,8 +152,11 @@ class QQGroupProfileTool(BaseTool):
         Returns:
             操作结果文本。
         """
-        if not self.adapter or not self.adapter.bot:
-            return "错误：适配器不可用。"
+        if not self.adapter or not getattr(self.adapter, "bot", None):
+            return (
+                "错误：当前账号的适配器不可用（未绑定或尚未连接）。\n"
+                "请在 WebUI 检查该 QQ 适配器的状态，重启后重试。"
+            )
 
         # 检查是否群聊
         if not event.is_group_message():
@@ -255,6 +260,7 @@ class QQGroupProfileTool(BaseTool):
             资料文本。
         """
         data: dict = {}
+        err_note = ""
         try:
             resp = await asyncio.wait_for(
                 self.adapter.bot.send_action(
@@ -265,6 +271,7 @@ class QQGroupProfileTool(BaseTool):
             if isinstance(resp, dict):
                 data = resp.get("data") or {}
         except Exception as e:
+            err_note = f"{type(e).__name__}: {e}"
             logger.debug(f"[QQ增强2] get_group_info 失败: {group_id}: {e}")
 
         name = str(data.get("group_name") or "")
@@ -296,9 +303,18 @@ class QQGroupProfileTool(BaseTool):
             lines.append(f"  群头像：{avatar_url}")
             if self.avatar_describe:
                 desc = await self._describe_avatar(avatar_url)
-                lines.append(f"  群头像内容：{desc}" if desc else "  群头像内容：（识别失败，仅提供链接）")
+                if desc:
+                    lines.append(f"  群头像内容：{desc}")
+                else:
+                    reason = getattr(self, "_avatar_desc_reason", "")
+                    lines.append(
+                        f"  群头像内容：（未识别：{reason}）" if reason
+                        else "  群头像内容：（识别失败，仅提供链接）"
+                    )
             else:
                 lines.append("  群头像内容：（识别已关闭，仅提供链接）")
+        if err_note and not name:
+            lines.append(f"  （群资料获取失败：{err_note}）")
         return "\n".join(lines)
 
     async def _describe_avatar(self, head_url: str) -> str:
@@ -311,17 +327,18 @@ class QQGroupProfileTool(BaseTool):
             描述文本；失败返回空串。
         """
         try:
-            from qq_core.avatar_view import describe_avatar
+            from qq_core.avatar_view import describe_avatar_ex
         except ImportError:
+            self._avatar_desc_reason = "框架缺少 avatar_view 模块"
             return ""
 
         vlm = None
         try:
             vlm = self.ctx.provider_mgr.get_default_vlm()
-        except Exception:
-            vlm = None
+        except Exception as e:
+            logger.debug(f"[QQ增强2] 取默认 VLM 失败: {type(e).__name__}: {e}")
 
-        return await describe_avatar(
+        desc, reason = await describe_avatar_ex(
             head_url,
             vlm=vlm,
             ctx=self.ctx,
@@ -330,6 +347,10 @@ class QQGroupProfileTool(BaseTool):
             ttl=self.avatar_desc_cache_seconds,
             lang=self._get_locale_lang(),
         )
+        self._avatar_desc_reason = reason
+        if reason:
+            logger.warning(f"[QQ增强2] 群头像未识别: {head_url} → {reason}")
+        return desc
 
     def _get_locale_lang(self) -> str:
         """获取框架语言设置（config 可能是 dict 或 KiraConfig 对象）。"""

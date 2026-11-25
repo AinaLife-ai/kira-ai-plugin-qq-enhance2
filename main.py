@@ -28,6 +28,7 @@ from .qq_core.env_renderer import (render_env_summary, filter_env_events,
                                    prune_expiry_announced)
 from .qq_core.wake_scheduler import WakeScheduler
 from .qq_core.message_locator import MessageLocator
+from .qq_core.adapter_bind import resolve_adapter
 from .qq_core.recall_rewriter import RecallRewriter
 from .qq_core.session_pick import pick_like_sid, remember_session
 from .qq_core.emoji_rewriter import EmojiRewriter
@@ -153,14 +154,20 @@ class QQEnhance2Plugin(BasePlugin):
             self._adapters[name] = (ada, sid_self)
 
         if not self._adapters:
-            logger.warning("[QQ增强2] 未找到 QQ 适配器，插件降级运行。")
-            return
-
-        # 默认适配器（第一个）—— 用于无会话上下文时的兜底
-        first_name = next(iter(self._adapters))
-        self.adapter, self.self_id = self._adapters[first_name]
-        if len(self._adapters) > 1:
-            logger.info(f"[QQ增强2] 检测到 {len(self._adapters)} 个 QQ 适配器: {list(self._adapters)}")
+            # **不能 return**：适配器可能是"稍后才启用/新建"的（WebUI 里刚打开），
+            # 早期 return 会让 store/locator 全部为 None →
+            # 工具永远不进 tool_set（实机：用户明明开了「启用资料工具」，工具列表里却没有）。
+            # 这里只告警，其余组件照常初始化，适配器按事件实时解析（晚绑定）。
+            logger.warning(
+                "[QQ增强2] 启动时未发现 QQ 适配器：工具与事件将按会话动态解析（晚绑定），"
+                "适配器启用后无需重载插件。"
+            )
+        else:
+            # 默认适配器（第一个）—— 用于无会话上下文时的兜底
+            first_name = next(iter(self._adapters))
+            self.adapter, self.self_id = self._adapters[first_name]
+            if len(self._adapters) > 1:
+                logger.info(f"[QQ增强2] 检测到 {len(self._adapters)} 个 QQ 适配器: {list(self._adapters)}")
 
         # 初始化组件（locator 支持多适配器：按 sid 动态取）
         data_dir = self.ctx.get_plugin_data_dir()
@@ -408,19 +415,34 @@ class QQEnhance2Plugin(BasePlugin):
                     yield ada, info
 
     def _resolve_adapter(self, adapter_name: str):
-        """按适配器名取 (adapter, self_id)；找不到时回退默认。
+        """按适配器名取 (adapter, self_id)；**优先取框架当前实例**。
+
+        适配器在 WebUI 里重启/改配置后会被重建（旧实例已关闭、websocket=None），
+        缓存的实例会让工具报 `NapCat WebSocket 未连接`。实现见
+        `qq_core/adapter_bind.py`（纯逻辑，可单测）。
 
         Args:
-            adapter_name: 适配器名（sid 的第一段）。
+            adapter_name: 适配器名（sid 的第一段 / event.adapter.name）。
 
         Returns:
             (adapter, self_id) 元组。
         """
-        adapters = getattr(self, "_adapters", None) or {}
-        hit = adapters.get(adapter_name)
-        if hit:
-            return hit
-        return getattr(self, "adapter", None), getattr(self, "self_id", "")
+        if not isinstance(getattr(self, "_adapters", None), dict):
+            self._adapters = {}
+
+        def _self_id_of(ada) -> str:
+            return self._extract_self_id(
+                ada, getattr(ada, "info", None), getattr(ada, "config", None) or {},
+            )
+
+        return resolve_adapter(
+            self.ctx,
+            adapter_name,
+            self._adapters,
+            getattr(self, "adapter", None),
+            getattr(self, "self_id", ""),
+            _self_id_of,
+        )
 
     def _resolve_self_id(self, adapter_name: str) -> str:
         """按适配器名取该号的 self_id（多号部署必需）。
@@ -945,20 +967,46 @@ class QQEnhance2Plugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def inject_tools(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
-        """注入 QQ 工具（按当前会话的适配器绑定，支持多号）。"""
-        if not self.adapter:
-            return
+        """注入 QQ 工具（按当前会话的适配器绑定，支持多号）。
 
+        **不依赖 initialize() 时的缓存**：适配器可能在插件加载后才启用/重建，
+        所以这里始终按事件所属适配器实时解析（晚绑定）。
+        """
         # 只处理 QQ 平台
-        if event.adapter.platform != "QQ":
+        if getattr(event.adapter, "platform", "") != "QQ":
             return
 
         # 按会话的适配器取（多号部署时用对应账号）
         sid = getattr(event, "sid", "") or ""
-        adapter_name = sid.split(":", 1)[0] if ":" in sid else ""
+        adapter_name = (
+            getattr(event.adapter, "name", "")
+            or (sid.split(":", 1)[0] if ":" in sid else "")
+        )
         cur_adapter, cur_self_id = self._resolve_adapter(adapter_name)
         if not cur_adapter:
-            cur_adapter, cur_self_id = self.adapter, self.self_id
+            # 适配器还没起来：工具照样注册（调用时会给出明确错误），
+            # 绝不因为"暂时没有实例"就从工具列表里消失。
+            logger.debug(
+                f"[QQ增强2] 注入工具时未解析到适配器（{adapter_name or '?'}），"
+                "工具将返回明确的不可用提示。"
+            )
+
+        # 防御：极少数路径框架可能没建 tool_set（LLMRequest 里默认 None），
+        # 直接 .add() 会抛 AttributeError，表现为"工具静默消失"。
+        if req.tool_set is None:
+            try:
+                from core.agent.tool import ToolSet
+                req.tool_set = ToolSet()
+                logger.warning("[QQ增强2] LLMRequest.tool_set 为空，已补建（框架异常路径）")
+            except Exception as e:
+                logger.error(f"[QQ增强2] 无法初始化 tool_set，跳过工具注入: {e}")
+                return
+
+        if self.debug_log:
+            logger.info(
+                f"[QQ增强2] 注入工具: profile={self.tools_profile} "
+                f"adapter={getattr(cur_adapter, 'name', '') or '(未解析)'}"
+            )
 
         if self.tools_profile:
             req.tool_set.add(QQProfileTool(ctx=self.ctx, adapter=cur_adapter, self_id=cur_self_id,

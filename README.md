@@ -177,6 +177,41 @@
 ## 更新日志
 
 <details>
+<summary><b>v1.1.9</b>（2026-11-25）— 适配器实时绑定 / 工具不再消失 / 头像失败可见</summary>
+
+### 🐞 工具列表里看不到 qq_profile（用户实机）
+- **根因**：`initialize()` 在"启动时没发现适配器"时直接 `return` → `store/locator` 全空 +
+  `inject_tools` 第一行 `if not self.adapter: return` ⇒ 工具永远不注册。
+  适配器若是稍后才启用/新建（WebUI 里刚开），插件就一直"半死"。
+- **修复**：不再早退（只告警）；工具按**每个请求的事件**实时解析适配器（晚绑定）；
+  `LLMRequest.tool_set` 为 None 时补建，避免 `.add()` 抛错导致工具静默消失。
+
+### 🐞 同一台机器连接正常，工具报 "NapCat WebSocket 未连接"
+- **根因**：适配器在 WebUI 重启/改配置时会被 `stop_adapter()` 移除并**重建实例**，
+  插件缓存的是已关闭的旧实例（`bot.websocket is None`）。
+- **修复**：`qq_core/adapter_bind.py` 实时向 `adapter_mgr.get_adapter(name)` 取实例并刷新缓存；
+  取不到才回退缓存 / 默认实例。
+- 顺带把错误文案改准：连接类错误不再谎称"用户不存在或无权限"，而是提示"协议端连接不可用，
+  请检查/重启该适配器"。
+
+### 🐞 头像只有 URL、没有 VLM 描述，且看不出原因
+- **根因**：`get_default_vlm()` 抛错被吞成 `vlm=None` → 直接返回空串，日志只有 debug。
+- **修复**：`describe_avatar_ex()` 返回 `(描述, 失败原因)`；失败原因写到 **WARNING** 日志，
+  并显示在工具输出里：
+  - `头像：https://…（未识别：未配置默认视觉模型（models.default_vlm 为空））`
+  - `（未识别：识别超时（>20s））`、`（未识别：识别失败（RuntimeError: …））`
+- 群头像 `look_group_avatar` 同样显示原因。
+- `avatar_desc_cache_seconds=0` 语义不变（完全不缓存）。
+
+### ✅ 验证
+pytest **182**（新增 `test_regressions16.py` 10 项：实时优先/缓存回退/自身 id 回退/
+tool_set 防御/头像原因三态/连接错误文案）；KiraAI **v3.3.0** 与 **v3.1.2** 双版本
+self_scope 46 / config 25 / deep 30 / scenario 27 / safety 35 / edge 23 / robustness 34 /
+audit_full 14 / 前后端 10 / avatar 52 全绿。
+
+</details>
+
+<details>
 <summary><b>v1.1.8</b>（2026-11-18）— 可选：记录自己的禁言/解禁操作</summary>
 
 ### ✨ 新增两个独立开关（默认都关）

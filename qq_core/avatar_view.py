@@ -39,9 +39,23 @@ _L1: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _L1_MAX = 128
 
 
+# 失败原因去重（同一 URL+原因只告警一次，避免刷日志）
+_WARNED: "OrderedDict[str, float]" = OrderedDict()
+
 def clear_l1_cache() -> None:
     """清空进程内缓存（测试用）。"""
     _L1.clear()
+    _WARNED.clear()
+
+def _warn_once(url: str, reason: str) -> None:
+    """把失败原因打到 WARNING（同一 URL+原因只打一次）。"""
+    key = f"{url}|{reason}"
+    if key in _WARNED:
+        return
+    _WARNED[key] = time.time()
+    while len(_WARNED) > 128:
+        _WARNED.popitem(last=False)
+    logger.warning(f"[QQ增强2] 头像识别失败: {reason} | url={url}")
 
 
 def _l1_get(url: str, ttl: float) -> str:
@@ -122,7 +136,7 @@ def _framework_cache(ctx):
     return cache
 
 
-async def describe_avatar(
+async def describe_avatar_ex(
     url: str,
     *,
     vlm=None,
@@ -132,8 +146,11 @@ async def describe_avatar(
     ttl: float = 60.0,
     lang: Optional[str] = None,
     max_len: int = 300,
-) -> str:
-    """下载头像并用 VLM 生成描述。
+) -> tuple[str, str]:
+    """下载头像并用 VLM 生成描述，同时返回**失败原因**。
+
+    与 `describe_avatar` 的区别：失败时不再只给空串，而是给出可读原因，
+    方便用户在工具输出里直接看到"为什么没识别"（而不是以为模型坏了）。
 
     Args:
         url: 头像 URL（腾讯 CDN 或协议端返回的地址）。
@@ -146,32 +163,38 @@ async def describe_avatar(
         max_len: 描述最大长度（防止 VLM 长篇大论刷爆工具输出）。
 
     Returns:
-        头像描述文本；失败时返回空串（调用方降级为只给 URL）。
+        (描述, 失败原因)。成功时原因为空串；失败时描述为空串。
     """
     url = (url or "").strip()
     if not url:
-        return ""
+        return "", "头像 URL 为空"
 
     # ---- L1 ----
     cached = _l1_get(url, ttl)
     if cached:
-        return cached
+        return cached, ""
 
     if vlm is None and ctx is not None:
         try:
             vlm = ctx.provider_mgr.get_default_vlm()
-        except Exception:
-            vlm = None
+        except Exception as e:
+            reason = f"未配置默认视觉模型（models.default_vlm：{type(e).__name__}: {e}）"
+            _warn_once(url, reason)
+            return "", reason
     if vlm is None:
-        return ""
+        reason = "未配置默认视觉模型（models.default_vlm 为空）"
+        _warn_once(url, reason)
+        return "", reason
 
     # ---- 图片 + 内容 md5（只有能用上 L2 才下载）----
     fw_cache = _framework_cache(ctx) if ttl > 0 else None
     img = None
     md5 = ""
+    prepare_error = ""
     try:
         img, md5 = await _prepare_image(url, need_md5=fw_cache is not None)
     except Exception as e:
+        prepare_error = f"{type(e).__name__}: {e}"
         logger.debug(f"[QQ增强2] 头像准备失败（转为直接识别）: {url}: {e}")
         img = None
 
@@ -182,7 +205,7 @@ async def describe_avatar(
             if desc:
                 desc = desc.strip()
                 _l1_put(url, desc, ttl)
-                return desc
+                return desc, ""
         except Exception as e:
             logger.debug(f"[QQ增强2] 读 ImageDescCache 失败: {e}")
 
@@ -190,11 +213,15 @@ async def describe_avatar(
     if img is None:
         try:
             img = Image(url)
-        except Exception:
-            return ""
+        except Exception as e:
+            reason = f"图片地址无效（{type(e).__name__}: {e}）"
+            _warn_once(url, reason)
+            return "", reason
     desc_fn = _resolve_desc_img()
     if desc_fn is None:
-        return ""
+        reason = "框架缺少 desc_img（core.utils.common_utils 不兼容）"
+        _warn_once(url, reason)
+        return "", reason
     try:
         custom_prompt = (prompt or "").strip() or None
         desc = await asyncio.wait_for(
@@ -202,15 +229,21 @@ async def describe_avatar(
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        logger.debug(f"[QQ增强2] 头像描述超时（>{timeout}s）: {url}")
-        return ""
+        reason = f"识别超时（>{timeout:g}s）"
+        _warn_once(url, reason)
+        return "", reason
     except Exception as e:
-        logger.debug(f"[QQ增强2] 头像描述失败: {url}: {e}")
-        return ""
+        reason = f"识别失败（{type(e).__name__}: {str(e)[:120]}）"
+        if prepare_error:
+            reason += f"；图片准备也失败（{prepare_error[:80]}）"
+        _warn_once(url, reason)
+        return "", reason
 
     desc = (desc or "").strip()
     if not desc:
-        return ""
+        reason = "模型返回空描述"
+        _warn_once(url, reason)
+        return "", reason
     if max_len and len(desc) > max_len:
         desc = desc[:max_len] + "…"
 
@@ -222,4 +255,9 @@ async def describe_avatar(
                 await fw_cache.set(md5, desc)
             except Exception as e:
                 logger.debug(f"[QQ增强2] 写 ImageDescCache 失败: {e}")
+    return desc, ""
+
+async def describe_avatar(url: str, **kwargs) -> str:
+    """兼容旧接口：只返回描述（失败为空串）。"""
+    desc, _ = await describe_avatar_ex(url, **kwargs)
     return desc
