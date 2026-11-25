@@ -211,7 +211,28 @@ class QQEnhance2Plugin(BasePlugin):
         self.emoji_rewriter = EmojiRewriter()
         self.name_resolver = NameResolver(ttl=self.resolve_cache_seconds)
 
+        self._warn_if_no_vlm()
         logger.info("[QQ增强2] 初始化完成。")
+
+    def _warn_if_no_vlm(self) -> None:
+        """启动时检查默认视觉模型：没配置就提前告警（否则用户只看到"头像没有描述"）。
+
+        头像识别（qq_profile / 群头像）依赖 `models.default_vlm`；
+        未配置时框架的 `get_default_vlm()` 会抛异常，旧版被静默吞掉。
+        """
+        if not getattr(self, "avatar_describe", True):
+            return
+        try:
+            cfg = getattr(self.ctx, "config", None)
+            getter = getattr(cfg, "get_config", None)
+            ref = getter("models.default_vlm", "") if callable(getter) else ""
+            if not ref:
+                logger.warning(
+                    "[QQ增强2] 未配置 models.default_vlm（默认视觉模型）："
+                    "头像识别将只输出链接。请到 WebUI「模型」里设置默认视觉模型。"
+                )
+        except Exception:
+            pass
 
     @staticmethod
     def _get_self_nickname(adapter) -> str:
