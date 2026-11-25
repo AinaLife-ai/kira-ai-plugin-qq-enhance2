@@ -194,6 +194,16 @@
 - 顺带把错误文案改准：连接类错误不再谎称"用户不存在或无权限"，而是提示"协议端连接不可用，
   请检查/重启该适配器"。
 
+### 🐞 真实安装下头像识别失效（v1.1.7 起的回归）
+- **根因**：`tools/*` 里写的是 `from qq_core.avatar_view import ...`。真实安装时插件被加载成
+  `plugins.<目录>` 包，**`qq_core` 不是顶层包** ⇒ ImportError；v1.1.7/1.1.8 静默返回空描述，
+  v1.1.9 加上原因后才暴露成"（未识别：框架缺少 avatar_view 模块）"。
+- **修复**：新增 `tools/_bridge.py`，用 importlib 按当前包逐级解析
+  （真实安装 / 包内加载 / 测试顶层三种布局都覆盖）。`avatar_view` 与 `fmt`
+  （头像设置用的 `file_to_protocol_uri` / `normalize_file_uri`）全部改走桥。
+- **回归防护**：`tests/adapter_late_bind_check.py` 会把插件根目录从 `sys.path` 移除、
+  清掉顶层 `qq_core`，再验证「头像/群头像能识别」「本地文件 → base64」「所有插件模块可导入」。
+
 ### 🐞 头像只有 URL、没有 VLM 描述，且看不出原因
 - **根因**：`get_default_vlm()` 抛错被吞成 `vlm=None` → 直接返回空串，日志只有 debug。
 - **修复**：`describe_avatar_ex()` 返回 `(描述, 失败原因)`；失败原因写到 **WARNING** 日志，
