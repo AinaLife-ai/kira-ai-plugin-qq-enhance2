@@ -170,6 +170,19 @@ async def main():
     check("真实布局下群头像也能识别", gdesc == "一只蓝猫",
           (gdesc, getattr(gt, "_avatar_desc_reason", "")))
 
+    # 5.1c 真实布局下，插件所有模块都必须可导入（防同类绝对导入问题）
+    import pkgutil
+    pkg_root = str(inst.__class__.__module__).rsplit(".", 1)[0]
+    bad_mods = []
+    for sub in ("qq_core", "tools"):
+        pkg = importlib.import_module(f"{pkg_root}.{sub}")
+        for m in pkgutil.iter_modules(pkg.__path__):
+            try:
+                importlib.import_module(f"{pkg_root}.{sub}.{m.name}")
+            except Exception as e:
+                bad_mods.append(f"{sub}.{m.name}: {type(e).__name__}: {e}")
+    check("真实布局下所有插件模块可导入", not bad_mods, bad_mods[:3])
+
     # 5.2 fmt 桥：本地文件 → base64://
     tmp_png = Path(tempfile.mkdtemp()) / "a.png"
     tmp_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
