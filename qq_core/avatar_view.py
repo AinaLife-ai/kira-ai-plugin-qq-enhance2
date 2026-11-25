@@ -48,8 +48,12 @@ def clear_l1_cache() -> None:
     _WARNED.clear()
 
 def _warn_once(url: str, reason: str) -> None:
-    """把失败原因打到 WARNING（同一 URL+原因只打一次）。"""
-    key = f"{url}|{reason}"
+    """把失败原因打到 WARNING（**同一原因只打一次**，附首个触发 URL）。
+
+    按原因而不是按 URL 去重：没配默认 VLM 时每个头像都会失败，
+    按 URL 去重会一次刷出几十条同义告警。
+    """
+    key = reason
     if key in _WARNED:
         return
     _WARNED[key] = time.time()

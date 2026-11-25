@@ -209,8 +209,11 @@ class QQProfileTool(BaseTool):
         Returns:
             操作结果文本。
         """
-        if not self.adapter or not self.adapter.bot:
-            return "错误：适配器不可用。"
+        if not self.adapter or not getattr(self.adapter, "bot", None):
+            return (
+                "错误：当前账号的适配器不可用（未绑定或尚未连接）。\n"
+                "请在 WebUI 检查该 QQ 适配器的状态，重启后重试。"
+            )
 
         # 判定读写模式
         # 关键：不传 user_id 时用**多级兜底**解析 self_id。
