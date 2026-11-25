@@ -239,6 +239,38 @@ def test_tool_connection_error_message():
     check("提示重启适配器", "适配器" in out, out)
 
 
+
+def test_tool_always_shows_avatar_url():
+    """识别成功时也要给 URL（bot 可能想引用/发送原图），描述另起一行。"""
+    bot = _Bot({
+        "get_stranger_info": {"status": "ok", "data": {
+            "user_id": 769690776, "nickname": "周武", "sex": "male",
+        }},
+    })
+    tool = _tool(bot)
+
+    async def fake(url):
+        return "一只蓝猫"
+
+    tool._describe_avatar = fake
+    out = asyncio.run(tool.execute(_Ev(), user_id="769690776", look_avatar=True))
+    check("识别成功时仍输出头像 URL", "头像：https://q1.qlogo.cn/g?b=qq&nk=769690776&s=640" in out, out[-160:])
+    check("描述单独成行", "头像内容：一只蓝猫" in out, out[-160:])
+    check("不再把描述当成头像值", "头像：一只蓝猫" not in out, out[-160:])
+
+
+def test_tool_url_only_when_recognition_off():
+    bot = _Bot({
+        "get_stranger_info": {"status": "ok", "data": {
+            "user_id": 769690776, "nickname": "周武", "sex": "male",
+        }},
+    })
+    tool = _tool(bot)
+    out = asyncio.run(tool.execute(_Ev(), user_id="769690776", look_avatar=False))
+    check("关闭识别时给 URL", "头像：https://q1.qlogo.cn/g?b=qq&nk=769690776&s=640" in out, out[-120:])
+    check("关闭识别时没有描述行", "头像内容：" not in out, out[-120:])
+
+
 def _main():
     test_resolve_prefers_live()
     test_resolve_falls_back_to_cache()
@@ -250,6 +282,8 @@ def _main():
     test_avatar_reason_success_empty()
     test_tool_shows_avatar_reason()
     test_tool_connection_error_message()
+    test_tool_always_shows_avatar_url()
+    test_tool_url_only_when_recognition_off()
     print("\n" + "=" * 60)
     print(f"回归18: {len(PASS)} 通过, {len(FAIL)} 失败")
     if FAIL:

@@ -272,6 +272,18 @@ async def e2e_desc_cache():
 
     orig = cu.desc_img
     cu.desc_img = fake_desc_img
+    # 下载是真实网络行为，这里打桩，测试只关心缓存命中次数
+    import qq_core.avatar_view as av
+    orig_prepare = av._prepare_image
+
+    async def fake_prepare(url, timeout=av.DOWNLOAD_TIMEOUT):
+        import tempfile as _tmp
+        path = _tmp.mktemp(suffix=".jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"0" * 64)
+        return path, "md5-fake"
+
+    av._prepare_image = fake_prepare
     try:
         class CtxVLM:
             class provider_mgr:
@@ -290,6 +302,7 @@ async def e2e_desc_cache():
         return calls["n"], d1, d2
     finally:
         cu.desc_img = orig
+        av._prepare_image = orig_prepare
 
 n, d1, d2 = run(e2e_desc_cache())
 print(f"  VLM 调用次数: {n}；描述: {d1!r}")
@@ -307,6 +320,18 @@ async def e2e_desc_cache_disabled():
 
     orig = cu.desc_img
     cu.desc_img = fake_desc_img
+    # 下载是真实网络行为，这里打桩，测试只关心缓存命中次数
+    import qq_core.avatar_view as av
+    orig_prepare = av._prepare_image
+
+    async def fake_prepare(url, timeout=av.DOWNLOAD_TIMEOUT):
+        import tempfile as _tmp
+        path = _tmp.mktemp(suffix=".jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"0" * 64)
+        return path, "md5-fake"
+
+    av._prepare_image = fake_prepare
     try:
         class CtxVLM:
             class provider_mgr:
@@ -326,6 +351,7 @@ async def e2e_desc_cache_disabled():
         return calls["n"]
     finally:
         cu.desc_img = orig
+        av._prepare_image = orig_prepare
 
 n0 = run(e2e_desc_cache_disabled())
 print(f"  avatar_desc_cache_seconds=0 时 VLM 调用次数: {n0}")

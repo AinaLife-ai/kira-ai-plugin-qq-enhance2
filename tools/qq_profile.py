@@ -502,12 +502,15 @@ class QQProfileTool(BaseTool):
         # 头像：读图（VLM 描述），而非只给 URL
         if head_url:
             avatar_desc = await self._describe_avatar(head_url) if describe else ""
-            if avatar_desc:
-                result += f"  头像：{avatar_desc}\n"
-            else:
-                reason = getattr(self, "_avatar_desc_reason", "")
-                reason = f"（未识别：{reason}）" if (describe and reason) else ""
-                result += f"  头像：{head_url}{reason}\n"
+            # URL 永远给出（模型可能想引用/发送原图），识别成功时再补一行描述
+            result += f"  头像：{head_url}\n"
+            if describe:
+                if avatar_desc:
+                    result += f"  头像内容：{avatar_desc}\n"
+                else:
+                    reason = getattr(self, "_avatar_desc_reason", "")
+                    if reason:
+                        result += f"  头像内容：（未识别：{reason}）\n"
         else:
             result += "  头像：（无法获取）\n"
 
